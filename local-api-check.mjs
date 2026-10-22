@@ -26,6 +26,8 @@ try {
   await cp(join(sourceRoot, 'local-export.mjs'), join(testRoot, 'local-export.mjs'));
   await mkdir(join(testRoot, 'local-upload', 'image'), { recursive: true });
   await mkdir(join(testRoot, 'local-upload', 'material'), { recursive: true });
+  await mkdir(join(testRoot, 'local-upload', 'script'), { recursive: true });
+  await writeFile(join(testRoot, 'local-upload', 'script', 'test.txt'), '第一场\n角色进入房间。');
   await writeFile(join(testRoot, 'local-upload', 'image', 'test.png'),
     Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==', 'base64'));
   await writeFile(join(testRoot, 'local-upload', 'image', 'test2.png'),
@@ -81,6 +83,19 @@ try {
   assert.equal((await call(api, '/gw/user/resource/getResource', {
     type: 4, isStar: 2,
   })).result.total, 0);
+  const customVoice = await call(api, '/gw/storyboard/voiceTone/createMine', {
+    name: '本地旁白', voiceUrl: '/local-upload/material/tone.wav',
+  });
+  assert.equal(customVoice.result.provider, 'custom');
+  assert.equal((await call(api, '/gw/storyboard/voiceTone/updateMine', {
+    id: customVoice.result.id, name: '本地旁白更新',
+  })).result.name, '本地旁白更新');
+  assert.equal((await call(api, '/gw/storyboard/voiceTone/updateMine', {
+    id: customVoice.result.id, name: '不应保存', voiceUrl: '/local-upload/material/missing.wav',
+  })).code, 400);
+  assert.equal((await call(api, '/gw/storyboard/voiceTone/detail', {
+    id: customVoice.result.id,
+  })).result.name, '本地旁白更新');
   assert.equal((await call(api, '/gw/assets/resource/getParentResource', {
     type: 1, isStar: 1,
   })).result.total, 1);
@@ -102,8 +117,74 @@ try {
   assert.deepEqual(listing.result.items.map(item => item.name), ['空资源组']);
   assert.deepEqual((await call(api, '/gw/user/resource/getResource', { type: 4 }))
     .result.items.map(item => item.name), ['提示音更新']);
+  assert.equal((await call(api, '/gw/storyboard/voiceTone/listMine', {
+    page: 1, size: 20, provider: 'custom',
+  })).result.items[0].name, '本地旁白更新');
+  assert.equal((await call(api, '/gw/storyboard/voiceTone/detailAll', {
+    ids: [customVoice.result.id],
+  })).result.items[0].voiceUrl, '/local-upload/material/tone.wav');
+  assert.equal((await call(api, '/gw/storyboard/voiceTone/deleteMine', {
+    id: customVoice.result.id,
+  })).code, 0);
+  assert.equal((await call(api, '/gw/storyboard/voiceTone/listMine')).result.total, 0);
+  assert.equal((await call(api, '/gw/storyboard/voiceTone/detail', {
+    id: customVoice.result.id,
+  })).code, 404);
   const project = await call(api, '/gw/storyboard/project/createFreeProject', { name: '测试项目' });
   const { projectId, seriesId } = project.result;
+  assert.equal((await call(api, '/gw/storyboard/project/editNewFreeProject', {
+    id: projectId, scriptUrl: '/local-upload/script/test.txt',
+    scriptName: '本地上传的文稿',
+  })).result.project.scriptName, '本地上传的文稿');
+  const director = await call(api, '/gw/storyboard/project/createDirectorCon', {
+    projectId, name: '导演台01', remark: '',
+    configJson: { version: 1, project: { objects: [], cameras: [] } },
+  });
+  assert.equal(director.result.configJson.version, 1);
+  assert.equal((await call(api, '/gw/storyboard/project/getDirectorCon', {
+    projectId,
+  })).result.totalCount, 1);
+  assert.equal((await call(api, '/gw/storyboard/project/updateDirectorCon', {
+    id: director.result.id, projectId, name: '镜头预演',
+    configJson: { version: 2, project: { objects: [{ id: 'actor-1' }] } },
+  })).result.configJson.version, 2);
+  const canvas = await call(api, '/gw/storyboard/project/createCanvasProject');
+  const canvasListing = await call(api, '/gw/storyboard/project/getCanvasProjects', {
+    spaceType: 'MY',
+  });
+  assert.equal(canvasListing.result.items[0].capabilities.canRead, true);
+  assert.equal(canvasListing.result.items[0].canMoveInCurrentSpace, true);
+  const canvasFolder = await call(api, '/gw/storyboard/project/createCanvasFolder', {
+    name: '预演画布',
+  });
+  assert.equal((await call(api, '/gw/storyboard/project/moveCanvasProjectsToFolder', {
+    spaceType: 'MY', targetFolderId: canvasFolder.result.id,
+    projectIds: [canvas.result.projectId],
+  })).result.updatedCount, 1);
+  assert.equal((await call(api, '/gw/storyboard/project/moveCanvasProjectsToFolder', {
+    spaceType: 'MY', targetFolderId: 9999999,
+    projectIds: [canvas.result.projectId],
+  })).code, 400);
+  assert.equal((await call(api, '/gw/storyboard/project/moveCanvasProjectsToFolder', {
+    spaceType: 'MY', targetFolderId: 'missing',
+    projectIds: [canvas.result.projectId],
+  })).code, 400);
+  assert.equal((await call(api, '/gw/storyboard/project/getCanvasProjects', {
+    spaceType: 'MY', folderId: canvasFolder.result.id,
+  })).result.total, 1);
+  const imagePreset = await call(api, '/gw/storyboard/imagePreset/create', {
+    name: '本地电影风格', prefixPrompt: '柔和侧光', suffixPrompt: '保留真实质感',
+    location: 110,
+  });
+  assert.equal(imagePreset.result.type, 99);
+  assert.equal((await call(api, '/gw/storyboard/imagePreset/update', {
+    id: imagePreset.result.id, name: '本地摄影风格',
+    prefixPrompt: '自然侧光', suffixPrompt: '保留真实质感',
+  })).result.name, '本地摄影风格');
+  assert.equal((await call(api, '/gw/storyboard/imagePreset/list', {
+    presetType: 0, location: 110,
+  })).result.items.find(item => item.id === imagePreset.result.id).prefixPrompt,
+  '自然侧光');
   const syncSource = await call(api, '/gw/storyboard/api/createProjectLibraryWithImages', {
     projectId, type: 1, name: '待同步角色',
     images: [{ name: '第一版', resourceUrl: '/local-upload/image/test.png' }],
@@ -229,6 +310,12 @@ try {
     imageList: [{ url: '/local-upload/image/test.png' }] });
   await call(api, '/gw/storyboard/api/save', { id: shot.result.id, seriesId,
     imageList: [{ url: '/local-upload/image/test2.png' }] });
+  const scriptExport = await call(api, '/gw/storyboard/api/export/scriptJsonBySeriesId', {
+    seriesId,
+  });
+  assert.equal(scriptExport.code, 0);
+  assert.equal(scriptExport.result.materials[0].url, '/local-upload/image/test2.png');
+  assert.equal(scriptExport.result.draftInfo.tracks.length, 1);
   const history = await call(api, '/gw/storyboard/api/historyList', {
     storyBoardId: shot.result.id, type: 1,
   });
@@ -272,11 +359,37 @@ try {
   assert.equal((await call(api, '/gw/storyboard/api/switchMaterial', {
     seriesId, storyBoardId: shot.result.id,
     storyBoardHistoryId: history.result.items[1].id, type: 1,
-  })).result.imageList[0].url, '/local-upload/image/test.png');
+  })).result.imageList[0], '/local-upload/image/test.png');
   api = (await import(`${moduleUrl}?reload=2`)).handleLocalApi;
+  assert.equal((await call(api, '/gw/storyboard/project/getDirectorCon', {
+    id: director.result.id, projectId,
+  })).result.name, '镜头预演');
+  assert.equal((await call(api, '/gw/storyboard/project/getProjectInfo', {
+    projectId,
+  })).result.scriptName, '本地上传的文稿');
+  assert.equal((await call(api, '/gw/storyboard/project/getCanvasProjects', {
+    spaceType: 'MY', folderId: canvasFolder.result.id,
+  })).result.total, 1);
+  assert.equal((await call(api, '/gw/storyboard/project/moveCanvasProjectsToFolder', {
+    spaceType: 'MY', targetFolderId: 0,
+    projectIds: [canvas.result.projectId],
+  })).result.updatedCount, 1);
+  assert.equal((await call(api, '/gw/storyboard/project/getCanvasProjects', {
+    spaceType: 'MY', location: 'UNASSIGNED',
+  })).result.items.some(item => item.projectId === canvas.result.projectId), true);
+  assert.equal((await call(api, '/gw/storyboard/imagePreset/list', {
+    presetType: 0, location: 110,
+  })).result.items.find(item => item.id === imagePreset.result.id).name,
+  '本地摄影风格');
+  assert.equal((await call(api, '/gw/storyboard/imagePreset/delete', {
+    id: imagePreset.result.id,
+  })).code, 0);
+  assert.equal((await call(api, '/gw/storyboard/imagePreset/list', {
+    presetType: 0, location: 110,
+  })).result.total, 1);
   const restoredShot = (await call(api, '/gw/storyboard/api/list', { seriesId })).result.items[0];
   assert.equal(restoredShot.produceType, 2);
-  assert.equal(restoredShot.imageList[0].url, '/local-upload/image/test.png');
+  assert.equal(restoredShot.imageList[0], '/local-upload/image/test.png');
   assert.equal((await call(api, '/gw/storyboard/series/getSeries', { projectId }))
     .result.items[0].isDetailed, 1);
   assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
@@ -291,6 +404,15 @@ try {
   })).result.total, 1);
   const copied = await call(api, '/gw/storyboard/project/copyProject', { projectId });
   assert.equal(copied.code, 0);
+  assert.equal((await call(api, '/gw/storyboard/project/getDirectorCon', {
+    projectId: copied.result.id,
+  })).result.items[0].configJson.version, 2);
+  assert.equal((await call(api, '/gw/storyboard/project/deleteDirectorCon', {
+    id: director.result.id, projectId,
+  })).code, 0);
+  assert.equal((await call(api, '/gw/storyboard/project/getDirectorCon', {
+    projectId,
+  })).result.totalCount, 0);
   const copiedSeries = (await call(api, '/gw/storyboard/series/getSeries', {
     projectId: copied.result.id,
   })).result.items[0];
@@ -322,7 +444,7 @@ try {
   assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
     projectId,
   })).result.total, 0);
-  console.log('项目素材复制与引用、项目历史、剧集及分镜的本地持久化检查通过');
+  console.log('项目素材、历史、音色、画布文件夹、图片预设、导演台及分镜的本地持久化检查通过');
 } finally {
   if (originalDataPath === undefined) delete process.env.JZZM_LOCAL_DATA;
   else process.env.JZZM_LOCAL_DATA = originalDataPath;

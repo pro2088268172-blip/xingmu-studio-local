@@ -4,11 +4,16 @@ import { describeSeriesMedia, prepareSeriesExport } from './local-export.mjs';
 
 const dataPath = process.env.JZZM_LOCAL_DATA || join(import.meta.dirname, 'local-data.json');
 const empty = () => ({ nextId: 1000, projects: [], series: [], shots: [], shotHistory: [], projectHistory: [],
-  libraryHistory: [],
+  libraryHistory: [], directorConfigs: [], imagePresets: [], voices: [],
   folders: [], library: [], resources: [], looseResources: [], canvasProjects: [], canvasFolders: [] });
 let data = empty();
+let hasSavedImagePresets = false;
 if (existsSync(dataPath)) {
-  try { data = { ...empty(), ...JSON.parse(readFileSync(dataPath, 'utf8')) }; }
+  try {
+    const stored = JSON.parse(readFileSync(dataPath, 'utf8'));
+    hasSavedImagePresets = Array.isArray(stored.imagePresets);
+    data = { ...empty(), ...stored };
+  }
   catch { /* Preserve the unreadable file; start with an empty in-memory state. */ }
 }
 data.series = data.series.map(series => ({
@@ -28,6 +33,14 @@ data.looseResources ||= [];
 data.shotHistory ||= [];
 data.projectHistory ||= [];
 data.libraryHistory ||= [];
+data.directorConfigs ||= [];
+data.imagePresets ||= [];
+data.voices ||= [];
+if (!hasSavedImagePresets) data.imagePresets.push({ id: ++data.nextId,
+  name: '电影级人像摄影', prefixPrompt: '人物质感自然，采用柔和侧光与电影调色',
+  suffixPrompt: '保留真实皮肤纹理与画面细节', type: 99, location: 110,
+  available: 1, sortOrder: 0, createTime: new Date().toISOString(),
+  updateTime: new Date().toISOString() });
 data.artStyles ||= [];
 data.scripts ||= [];
 data.structuredDocuments ||= {};
@@ -59,6 +72,10 @@ const localMediaList = values => Array.isArray(values) ? values.map(value =>
   typeof value === 'string' ? localUploadUrl(value) :
     value && typeof value === 'object' ? { ...value,
       url: localUploadUrl(value.url), resourceUrl: localUploadUrl(value.resourceUrl) } : value) : values;
+const shotMediaUrls = values => Array.isArray(values) ? values.map(value =>
+  typeof value === 'string' ? value : value?.url || value?.resourceUrl ||
+    value?.imageUrl || value?.videoUrl).filter(value => typeof value === 'string' && value)
+  .map(localUploadUrl) : [];
 const uploadedFile = (value, category, extensions) => {
   const pathname = localUploadUrl(value);
   const pattern = new RegExp(`^/local-upload/${category}/[A-Za-z0-9_-]+\\.(${extensions.join('|')})$`, 'i');
@@ -122,8 +139,12 @@ for (const series of data.series) {
   series.dubbingFiles = localMediaList(series.dubbingFiles);
 }
 for (const shot of data.shots) {
-  shot.imageList = localMediaList(shot.imageList);
-  shot.videoList = localMediaList(shot.videoList);
+  shot.imageList = shotMediaUrls(shot.imageList);
+  shot.videoList = shotMediaUrls(shot.videoList);
+}
+for (const history of data.shotHistory) {
+  history.imageList = shotMediaUrls(history.imageList);
+  history.videoList = shotMediaUrls(history.videoList);
 }
 for (const script of data.scripts) if (script.remoteUrl)
   script.remoteUrl = localUploadUrl(script.remoteUrl);
@@ -225,8 +246,9 @@ const canvasProjectView = project => ({
   creatorUserId: 1,
   spaceType: 'MY',
   readOnly: false,
+  canMoveInCurrentSpace: true,
   capabilities: {
-    canEdit: true, canRename: true, canDelete: true, canUpdateCover: true,
+    canRead: true, canEdit: true, canRename: true, canDelete: true, canUpdateCover: true,
     canMove: true, canCopy: true, canShare: false,
   },
 });
@@ -614,16 +636,63 @@ export async function handleLocalApi(req, res, pathname) {
       break;
     }
     case '/storyboard/voiceTone/listMine':
-      result = ok(list([], body));
+      result = ok(list([...data.voices].reverse(), body));
       break;
-    case '/storyboard/voiceTone/detailAll': {
-      const ids = Array.isArray(body.ids) ? body.ids.map(Number) : [];
-      result = ok({ items: ids.includes(localVoice.id) ? [localVoice] : [], totalCount: ids.includes(localVoice.id) ? 1 : 0 });
+    case '/storyboard/voiceTone/createMine': {
+      const name = String(body.name || '').trim();
+      const voiceUrl = localResourceMedia(body.voiceUrl);
+      if (!name || !voiceUrl || !/\.(mp3|wav)$/i.test(voiceUrl)) {
+        result = { code: 400, msg: '音色名称或本地音频文件无效' };
+        break;
+      }
+      const id = nextId();
+      const voice = { id, voiceId: `local-custom-${id}`, name, voiceUrl,
+        duration: Number(body.duration) || null,
+        provider: 'custom', category: 1, language: 'zh',
+        isDefault: 0, status: 1, createTime: new Date().toISOString() };
+      data.voices.push(voice);
+      save();
+      result = ok(voice);
       break;
     }
-    case '/storyboard/voiceTone/detail':
-      result = ok(localVoice);
+    case '/storyboard/voiceTone/updateMine': {
+      const voice = data.voices.find(item => item.id === Number(body.id));
+      if (!voice) { result = { code: 404, msg: '自定义音色不存在' }; break; }
+      const name = body.name === undefined ? voice.name : String(body.name).trim();
+      const voiceUrl = body.voiceUrl === undefined ? voice.voiceUrl :
+        localResourceMedia(body.voiceUrl);
+      if (!name || !voiceUrl || !/\.(mp3|wav)$/i.test(voiceUrl)) {
+        result = { code: 400, msg: '音色名称或本地音频文件无效' };
+        break;
+      }
+      voice.name = name;
+      voice.voiceUrl = voiceUrl;
+      voice.updateTime = new Date().toISOString();
+      save();
+      result = ok(voice);
       break;
+    }
+    case '/storyboard/voiceTone/deleteMine': {
+      const index = data.voices.findIndex(item => item.id === Number(body.id));
+      if (index < 0) { result = { code: 404, msg: '自定义音色不存在' }; break; }
+      data.voices.splice(index, 1);
+      save();
+      result = ok(true);
+      break;
+    }
+    case '/storyboard/voiceTone/detailAll': {
+      const ids = Array.isArray(body.ids) ? body.ids.map(Number) : [];
+      const items = [...(ids.includes(localVoice.id) ? [localVoice] : []),
+        ...data.voices.filter(voice => ids.includes(voice.id))];
+      result = ok({ items, totalCount: items.length });
+      break;
+    }
+    case '/storyboard/voiceTone/detail': {
+      const voice = data.voices.find(item => item.id === id) ||
+        (id === localVoice.id ? localVoice : null);
+      result = voice ? ok(voice) : { code: 404, msg: '音色不存在' };
+      break;
+    }
     case '/storyboard/project/getIndex':
     case '/storyboard/project/getProjects':
     case '/storyboard/project/getAllProjects':
@@ -675,6 +744,66 @@ export async function handleLocalApi(req, res, pathname) {
       const { project, seriesId } = createProject(body, 3);
       const projectId = project.id;
       result = ok({ id: projectId, projectId, seriesId });
+      break;
+    }
+    case '/storyboard/project/getDirectorCon': {
+      const projectId = Number(body.projectId);
+      if (body.id != null) {
+        result = ok(data.directorConfigs.find(item =>
+          item.id === Number(body.id) && item.projectId === projectId) || null);
+      } else {
+        const items = data.directorConfigs.filter(item => item.projectId === projectId);
+        result = ok({ items, totalCount: items.length });
+      }
+      break;
+    }
+    case '/storyboard/project/createDirectorCon': {
+      const projectId = Number(body.projectId);
+      if (!data.projects.some(project => project.id === projectId) ||
+          !body.configJson || typeof body.configJson !== 'object' ||
+          Array.isArray(body.configJson)) {
+        result = { code: 400, msg: '项目或导演台配置无效' };
+        break;
+      }
+      if (data.directorConfigs.filter(item => item.projectId === projectId).length >= 10) {
+        result = { code: 409, msg: '每个项目最多创建 10 条导演台' };
+        break;
+      }
+      const now = new Date().toISOString();
+      const config = { id: nextId(), projectId,
+        name: String(body.name || '导演台').trim(),
+        remark: String(body.remark || ''),
+        configJson: structuredClone(body.configJson),
+        createAt: now, updateAt: now };
+      data.directorConfigs.push(config);
+      save();
+      result = ok(config);
+      break;
+    }
+    case '/storyboard/project/updateDirectorCon': {
+      const config = data.directorConfigs.find(item =>
+        item.id === Number(body.id) && item.projectId === Number(body.projectId));
+      if (!config) { result = { code: 404, msg: '导演台不存在' }; break; }
+      if (body.configJson !== undefined && (!body.configJson ||
+          typeof body.configJson !== 'object' || Array.isArray(body.configJson))) {
+        result = { code: 400, msg: '导演台配置无效' };
+        break;
+      }
+      if (body.name !== undefined) config.name = String(body.name).trim();
+      if (body.remark !== undefined) config.remark = String(body.remark);
+      if (body.configJson !== undefined) config.configJson = structuredClone(body.configJson);
+      config.updateAt = new Date().toISOString();
+      save();
+      result = ok(config);
+      break;
+    }
+    case '/storyboard/project/deleteDirectorCon': {
+      const index = data.directorConfigs.findIndex(item =>
+        item.id === Number(body.id) && item.projectId === Number(body.projectId));
+      if (index < 0) { result = { code: 404, msg: '导演台不存在' }; break; }
+      data.directorConfigs.splice(index, 1);
+      save();
+      result = ok(true);
       break;
     }
     case '/storyboard/project/getProjectInfo':
@@ -736,6 +865,10 @@ export async function handleLocalApi(req, res, pathname) {
         data.scripts.push({ ...structuredClone(script), id: nextId(), projectId,
           createdAt: now, updatedAt: now });
       }
+      for (const config of data.directorConfigs.filter(item => item.projectId === original.id)) {
+        data.directorConfigs.push({ ...structuredClone(config), id: nextId(), projectId,
+          createAt: now, updateAt: now });
+      }
       const originalDocument = data.structuredDocuments[String(original.id)];
       if (originalDocument) {
         const source = originalDocument.document;
@@ -755,6 +888,7 @@ export async function handleLocalApi(req, res, pathname) {
     case '/storyboard/project/editProject':
     case '/storyboard/project/editDramaProject':
     case '/storyboard/project/editNewDramaProject':
+    case '/storyboard/project/editNewFreeProject':
     case '/storyboard/project/updateProject': {
       const project = data.projects.find(item => item.id === id);
       if (project) {
@@ -763,7 +897,8 @@ export async function handleLocalApi(req, res, pathname) {
           name: String(body.name || project.name), updateTime: new Date().toISOString() });
         save();
       }
-      result = ok(path === '/storyboard/project/editNewDramaProject'
+      result = ok((path === '/storyboard/project/editNewDramaProject' ||
+        path === '/storyboard/project/editNewFreeProject')
         ? { project: project || null } : project || null);
       break;
     }
@@ -778,6 +913,7 @@ export async function handleLocalApi(req, res, pathname) {
       data.libraryHistory = data.libraryHistory.filter(item => item.projectId !== id);
       data.library = data.library.filter(item => item.projectId !== id);
       data.scripts = data.scripts.filter(script => script.projectId !== id);
+      data.directorConfigs = data.directorConfigs.filter(config => config.projectId !== id);
       delete data.structuredDocuments[String(id)];
       save();
       result = ok(true);
@@ -884,6 +1020,28 @@ export async function handleLocalApi(req, res, pathname) {
         save();
       }
       result = okStrict(project ? canvasProjectView(project) : null);
+      break;
+    }
+    case '/storyboard/project/moveCanvasProjectsToFolder': {
+      const requestedFolderId = Number(body.targetFolderId);
+      const folderId = requestedFolderId === 0 ? null : requestedFolderId;
+      const projectIds = Array.isArray(body.projectIds)
+        ? [...new Set(body.projectIds.map(Number))] : [];
+      if ((body.spaceType && body.spaceType !== 'MY') || !projectIds.length ||
+          !Number.isSafeInteger(requestedFolderId) || requestedFolderId < 0 ||
+          (folderId && !data.canvasFolders.some(folder => folder.id === folderId)) ||
+          projectIds.some(projectId => !data.canvasProjects.some(project =>
+            project.projectId === projectId))) {
+        result = { code: 400, msg: '画布项目或目标文件夹无效' };
+        break;
+      }
+      const now = new Date().toISOString();
+      for (const project of data.canvasProjects) if (projectIds.includes(project.projectId)) {
+        project.folderId = folderId;
+        project.updateTime = now;
+      }
+      save();
+      result = okStrict({ updatedCount: projectIds.length });
       break;
     }
     case '/storyboard/project/deleteCanvasProject': {
@@ -1340,8 +1498,8 @@ export async function handleLocalApi(req, res, pathname) {
       const shotId = Number(body.id || body.storyBoardId) || nextId();
       let shot = data.shots.find(item => item.id === shotId);
       const fields = { ...body };
-      if (fields.imageList) fields.imageList = localMediaList(fields.imageList);
-      if (fields.videoList) fields.videoList = localMediaList(fields.videoList);
+      if (fields.imageList) fields.imageList = shotMediaUrls(fields.imageList);
+      if (fields.videoList) fields.videoList = shotMediaUrls(fields.videoList);
       const oldImageList = JSON.stringify(shot?.imageList || []);
       const oldVideoList = JSON.stringify(shot?.videoList || []);
       if (shot) Object.assign(shot, fields, { id: shotId });
@@ -1415,6 +1573,7 @@ export async function handleLocalApi(req, res, pathname) {
       result = describeSeriesMedia(data, body, import.meta.dirname);
       break;
     case '/storyboard/api/export/jsonBySeriesId':
+    case '/storyboard/api/export/scriptJsonBySeriesId':
       result = prepareSeriesExport(data, body, import.meta.dirname);
       break;
     case '/storyboard/plaza/home':
@@ -1510,17 +1669,57 @@ export async function handleLocalApi(req, res, pathname) {
         result = { code: 404, msg: '分镜历史素材不存在' };
         break;
       }
-      if (type === 1) shot.imageList = structuredClone(history.imageList);
-      else shot.videoList = structuredClone(history.videoList);
+      if (type === 1) shot.imageList = shotMediaUrls(history.imageList);
+      else shot.videoList = shotMediaUrls(history.videoList);
       shot.historyId = history.id;
       shot.historyType = type;
       save();
       result = ok(shot);
       break;
     }
-    case '/storyboard/imagePreset/list':
-      result = ok({ items: [], total: 0 });
+    case '/storyboard/imagePreset/list': {
+      let items = data.imagePresets.filter(item =>
+        body.location == null || item.location === Number(body.location));
+      if (body.presetType != null && Number(body.presetType) !== 0)
+        items = items.filter(item => item.type === Number(body.presetType));
+      result = ok(list(items, { ...body, size: body.size || 1000 }));
       break;
+    }
+    case '/storyboard/imagePreset/create':
+    case '/storyboard/imagePreset/update': {
+      const name = String(body.name || '').trim();
+      const prefixPrompt = String(body.prefixPrompt || '');
+      const suffixPrompt = String(body.suffixPrompt || '');
+      if (!name || [...name].length > 20 ||
+          (!prefixPrompt.trim() && !suffixPrompt.trim()) ||
+          [...prefixPrompt, ...suffixPrompt].length >= 3000) {
+        result = { code: 400, msg: '预设名称或提示词无效' };
+        break;
+      }
+      const editing = path.endsWith('/update');
+      const preset = editing ? data.imagePresets.find(item => item.id === Number(body.id)) : null;
+      if (editing && !preset) { result = { code: 404, msg: '图片预设不存在' }; break; }
+      const now = new Date().toISOString();
+      if (preset) Object.assign(preset, { name, prefixPrompt, suffixPrompt,
+        updateTime: now });
+      else {
+        data.imagePresets.push({ id: nextId(), name, prefixPrompt, suffixPrompt,
+          type: 99, location: Number(body.location || 110),
+          available: 1, sortOrder: data.imagePresets.length,
+          createTime: now, updateTime: now });
+      }
+      save();
+      result = ok(preset || data.imagePresets.at(-1));
+      break;
+    }
+    case '/storyboard/imagePreset/delete': {
+      const index = data.imagePresets.findIndex(item => item.id === Number(body.id));
+      if (index < 0) { result = { code: 404, msg: '图片预设不存在' }; break; }
+      data.imagePresets.splice(index, 1);
+      save();
+      result = ok(true);
+      break;
+    }
     case '/storyboard/task/queryTaskQueue':
     case '/msg/api/getMessages':
     case '/assets/resource/characterRank':
