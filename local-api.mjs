@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describeSeriesMedia, prepareSeriesExport } from './local-export.mjs';
 
 const dataPath = process.env.JZZM_LOCAL_DATA || join(import.meta.dirname, 'local-data.json');
-const empty = () => ({ nextId: 1000, projects: [], series: [], shots: [], shotHistory: [],
+const empty = () => ({ nextId: 1000, projects: [], series: [], shots: [], shotHistory: [], projectHistory: [],
   folders: [], library: [], resources: [], looseResources: [], canvasProjects: [], canvasFolders: [] });
 let data = empty();
 if (existsSync(dataPath)) {
@@ -25,6 +25,7 @@ data.canvasDocuments ||= {};
 data.resources ||= [];
 data.looseResources ||= [];
 data.shotHistory ||= [];
+data.projectHistory ||= [];
 data.artStyles ||= [];
 data.scripts ||= [];
 data.structuredDocuments ||= {};
@@ -144,14 +145,26 @@ const renumberShots = seriesId => {
 for (const series of data.series) renumberShots(series.id);
 
 const nextId = () => ++data.nextId;
+const personalTargetForLibrary = library => data.resources.find(resource =>
+  resource.source === 'private' && resource.sourceProjectLibraryId === library.id) ||
+  data.resources.find(resource => resource.source === 'private' &&
+    resource.type === library.type && resource.name === library.name);
+const localLibraryImages = (library, selectedIds = null) => (library.images || [])
+  .filter(image => selectedIds === null || selectedIds.has(Number(image.id)))
+  .map(image => ({ image,
+  url: localResourceImage(Array.isArray(image.resourceUrl)
+    ? image.resourceUrl[0] : image.resourceUrl) })).filter(item => item.url);
 const recordShotHistory = (shot, type) => {
   const id = nextId();
   const entry = { id, storyBoardHistoryId: id, storyBoardId: shot.id,
     seriesId: shot.seriesId, projectId: shot.projectId, type, historyType: type,
-    produceType: shot.produceType, imageList: structuredClone(shot.imageList || []),
+    produceType: shot.produceType, name: shot.name,
+    imagePrompt: shot.imagePrompt, videoPrompt: shot.videoPrompt,
+    originText: shot.originText,
+    imageList: structuredClone(shot.imageList || []),
     videoList: structuredClone(shot.videoList || []),
     audioList: structuredClone(shot.audioList || []),
-    createTime: new Date().toISOString() };
+    createAt: new Date().toISOString(), createTime: new Date().toISOString() };
   data.shotHistory.push(entry);
   const history = data.shotHistory.filter(item => item.storyBoardId === shot.id);
   if (history.length > 50) {
@@ -682,6 +695,11 @@ export async function handleLocalApi(req, res, pathname) {
           storyBoardHistoryId: historyId, storyBoardId: shotIds.get(history.storyBoardId),
           seriesId: seriesIds.get(history.seriesId), projectId });
       }
+      for (const history of data.projectHistory.filter(item => item.projectId === original.id)) {
+        const historyId = nextId();
+        data.projectHistory.push({ ...structuredClone(history), id: historyId,
+          historyId, projectId, seriesId: seriesIds.get(history.seriesId) || null });
+      }
       for (const library of data.library.filter(item => item.projectId === original.id)) {
         const libraryId = nextId();
         data.library.push({ ...structuredClone(library), id: libraryId, projectId,
@@ -731,6 +749,7 @@ export async function handleLocalApi(req, res, pathname) {
       data.series = data.series.filter(series => series.projectId !== id);
       data.shots = data.shots.filter(shot => !seriesIds.has(shot.seriesId));
       data.shotHistory = data.shotHistory.filter(item => !seriesIds.has(item.seriesId));
+      data.projectHistory = data.projectHistory.filter(item => item.projectId !== id);
       data.library = data.library.filter(item => item.projectId !== id);
       data.scripts = data.scripts.filter(script => script.projectId !== id);
       delete data.structuredDocuments[String(id)];
@@ -963,6 +982,7 @@ export async function handleLocalApi(req, res, pathname) {
       data.series = data.series.filter(series => series.id !== seriesId);
       data.shots = data.shots.filter(shot => shot.seriesId !== seriesId);
       data.shotHistory = data.shotHistory.filter(item => item.seriesId !== seriesId);
+      data.projectHistory = data.projectHistory.filter(item => item.seriesId !== seriesId);
       save();
       result = ok(true);
       break;
@@ -973,6 +993,117 @@ export async function handleLocalApi(req, res, pathname) {
     case '/storyboard/api/list':
       result = ok(list(data.shots.filter(shot => shot.seriesId === Number(body.seriesId)), body));
       break;
+    case '/storyboard/project/copyProjectLibrary': {
+      const sourceProjectId = Number(body.importProjectId);
+      const targetProjectId = Number(body.newProjectId);
+      const ids = Array.isArray(body.projectLibraryIds)
+        ? [...new Set(body.projectLibraryIds.map(Number).filter(Number.isSafeInteger))] : [];
+      if (!data.projects.some(project => project.id === sourceProjectId) ||
+          !data.projects.some(project => project.id === targetProjectId) ||
+          sourceProjectId === targetProjectId || !ids.length) {
+        result = { code: 400, msg: '源项目、目标项目或所选素材无效' };
+        break;
+      }
+      const copied = [];
+      let skippedCount = 0;
+      for (const sourceId of ids) {
+        const source = data.library.find(item =>
+          item.id === sourceId && item.projectId === sourceProjectId);
+        if (!source || data.library.some(item => item.projectId === targetProjectId &&
+            item.sourceProjectId === sourceProjectId &&
+            item.sourceProjectLibraryId === sourceId)) {
+          skippedCount++;
+          continue;
+        }
+        const libraryId = nextId();
+        const images = (source.images || []).map(image => ({ ...structuredClone(image),
+          id: nextId(), projectLibraryId: libraryId,
+          resourceUrl: (Array.isArray(image.resourceUrl)
+            ? image.resourceUrl : [image.resourceUrl].filter(Boolean)).map(localUploadUrl) }));
+        const item = { ...structuredClone(source), id: libraryId,
+          projectId: targetProjectId, seriesId: null,
+          sourceProjectId, sourceProjectLibraryId: sourceId,
+          images, createTime: new Date().toISOString() };
+        data.library.push(item);
+        copied.push(item);
+      }
+      if (copied.length) save();
+      result = ok({ copiedProjectLibraryCount: copied.length, skippedCount,
+        items: copied });
+      break;
+    }
+    case '/storyboard/project/checkProjectAssetSyncConflict': {
+      const library = data.library.find(item => item.id === Number(body.libraryId) &&
+        item.projectId === Number(body.projectId));
+      if (!library) { result = { code: 404, msg: '项目素材不存在' }; break; }
+      const target = personalTargetForLibrary(library);
+      if (!target) { result = ok([]); break; }
+      const sourceUrls = localLibraryImages(library).map(item => item.url).sort();
+      const targetUrls = (target.characterResources || []).map(item =>
+        localResourceImage(Array.isArray(item.resourceUrl)
+          ? item.resourceUrl[0] : item.resourceUrl)).filter(Boolean).sort();
+      const hasConflict = JSON.stringify(sourceUrls) !== JSON.stringify(targetUrls);
+      result = ok([{ name: library.name, hasConflict, isEdited: hasConflict,
+        newestTargetId: target.id, projectLibraryId: library.id,
+        parentResourceId: target.id }]);
+      break;
+    }
+    case '/storyboard/project/syncProjectAssetLibrary': {
+      const library = data.library.find(item => item.id === Number(body.libraryId) &&
+        item.projectId === Number(body.projectId));
+      if (!library) { result = { code: 404, msg: '项目素材不存在' }; break; }
+      let selectedIds = null;
+      if (body.imageIds !== undefined) {
+        if (!Array.isArray(body.imageIds) || !body.imageIds.length ||
+            body.imageIds.some(value => !Number.isSafeInteger(Number(value)))) {
+          result = { code: 400, msg: '请选择有效的素材图片' };
+          break;
+        }
+        selectedIds = new Set(body.imageIds.map(Number));
+        if ([...selectedIds].some(imageId =>
+          !(library.images || []).some(image => Number(image.id) === imageId))) {
+          result = { code: 400, msg: '所选图片不属于该项目素材' };
+          break;
+        }
+      }
+      const sourceImages = localLibraryImages(library, selectedIds);
+      if (!sourceImages.length) {
+        result = { code: 400, msg: '项目素材没有可同步的本地图片' };
+        break;
+      }
+      let target = personalTargetForLibrary(library);
+      const action = String(body.action || '').toLowerCase();
+      const now = new Date().toISOString();
+      if (target && !['merge', 'overwrite'].includes(action)) {
+        result = { code: 409, msg: '个人资产库已有同名素材，请选择合并或覆盖' };
+        break;
+      }
+      if (!target) {
+        target = { id: nextId(), source: 'private', sourceProjectId: library.projectId,
+          sourceProjectLibraryId: library.id, type: library.type, name: library.name,
+          description: library.description || '', characterResources: [],
+          isStar: false, isHidden: false, createTime: now };
+        data.resources.push(target);
+      }
+      const oldUrls = new Set((target.characterResources || []).map(image =>
+        localResourceImage(Array.isArray(image.resourceUrl)
+          ? image.resourceUrl[0] : image.resourceUrl)).filter(Boolean));
+      const inputs = action === 'merge'
+        ? sourceImages.filter(item => !oldUrls.has(item.url)) : sourceImages;
+      const newImages = inputs.map(({ image, url }) => ({ ...structuredClone(image),
+        id: nextId(), parentResourceId: target.id, projectLibraryImageId: image.id,
+        resourceUrl: url }));
+      target.characterResources = action === 'merge'
+        ? [...target.characterResources, ...newImages] : newImages;
+      target.mainResourceId = target.characterResources.find(image => image.isMain)?.id ||
+        target.characterResources[0]?.id || null;
+      target.sourceProjectId = library.projectId;
+      target.sourceProjectLibraryId = library.id;
+      target.updateTime = now;
+      save();
+      result = ok(target);
+      break;
+    }
     case '/storyboard/project/importParentResources': {
       const projectId = Number(body.projectId);
       if (!data.projects.some(project => project.id === projectId)) {
@@ -1198,9 +1329,78 @@ export async function handleLocalApi(req, res, pathname) {
       break;
     case '/storyboard/api/historyList': {
       const storyBoardId = Number(body.storyBoardId || body.id);
-      let history = data.shotHistory.filter(item => item.storyBoardId === storyBoardId);
+      const seriesId = Number(body.seriesId);
+      let history = data.shotHistory.filter(item => storyBoardId > 0
+        ? item.storyBoardId === storyBoardId
+        : seriesId > 0 && item.seriesId === seriesId);
       if (body.type) history = history.filter(item => item.type === Number(body.type));
       result = ok(list(history.reverse(), body));
+      break;
+    }
+    case '/storyboard/api/projectHistoryList': {
+      const projectId = Number(body.projectId);
+      let history = [...data.projectHistory, ...data.shotHistory]
+        .filter(item => item.projectId === projectId);
+      if (Number(body.type) > 0) history = history.filter(item => item.type === Number(body.type));
+      if (Number(body.seriesId) > 0)
+        history = history.filter(item => item.seriesId === Number(body.seriesId));
+      if (Number(body.isStar) === 1) history = history.filter(item => item.isStar);
+      const search = String(body.search || '').trim().toLowerCase();
+      if (search) history = history.filter(item =>
+        `${item.name || ''} ${item.imagePrompt || ''} ${item.videoPrompt || ''}`
+          .toLowerCase().includes(search));
+      history.sort((left, right) =>
+        Date.parse(right.updateAt || right.createAt || right.createTime || 0) -
+        Date.parse(left.updateAt || left.createAt || left.createTime || 0));
+      result = ok(list(history, body));
+      break;
+    }
+    case '/storyboard/api/createProjectHistory': {
+      const projectId = Number(body.projectId);
+      const type = Number(body.type);
+      if (!data.projects.some(project => project.id === projectId) || ![1, 2].includes(type)) {
+        result = { code: 400, msg: '项目或历史素材类型无效' };
+        break;
+      }
+      const seriesId = Number(body.seriesId) || null;
+      if (seriesId && !data.series.some(series =>
+        series.id === seriesId && series.projectId === projectId)) {
+        result = { code: 400, msg: '剧集不属于该项目' };
+        break;
+      }
+      let media = body[type === 1 ? 'imageList' : 'videoList'];
+      if (typeof media === 'string') {
+        try { media = JSON.parse(media); }
+        catch { media = []; }
+      }
+      const urls = (Array.isArray(media) ? media : []).map(item =>
+        typeof item === 'string' ? item : item?.url || item?.resourceUrl)
+        .map(url => type === 1 ? localResourceImage(url) : localResourceMedia(url))
+        .filter(url => url && (type === 1 || url.toLowerCase().endsWith('.mp4')));
+      if (!urls.length) { result = { code: 400, msg: '请先上传本地图片或视频' }; break; }
+      const historyId = nextId();
+      const now = new Date().toISOString();
+      const entry = { ...body, id: historyId, historyId, projectId, type,
+        historyType: type, seriesId,
+        imageList: type === 1 ? urls : [], videoList: type === 2 ? urls : [],
+        isStar: 0, createAt: now, updateAt: now };
+      data.projectHistory.push(entry);
+      save();
+      result = ok(entry);
+      break;
+    }
+    case '/storyboard/api/updateHistoryStar': {
+      const historyId = Number(body.storyBoardHistoryId || body.historyId || body.id);
+      const entry = data.shotHistory.find(item => item.id === historyId) ||
+        data.projectHistory.find(item => item.id === historyId);
+      if (!entry || body.seriesId && Number(body.seriesId) !== entry.seriesId) {
+        result = { code: 404, msg: '历史素材不存在' };
+        break;
+      }
+      entry.isStar = Number(body.isStar === true || Number(body.isStar) === 1);
+      entry.updateAt = new Date().toISOString();
+      save();
+      result = ok(entry);
       break;
     }
     case '/storyboard/api/switchMaterial': {

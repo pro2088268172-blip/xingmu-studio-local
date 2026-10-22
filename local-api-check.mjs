@@ -102,6 +102,42 @@ try {
     .result.items.map(item => item.name), ['提示音更新']);
   const project = await call(api, '/gw/storyboard/project/createFreeProject', { name: '测试项目' });
   const { projectId, seriesId } = project.result;
+  const syncSource = await call(api, '/gw/storyboard/api/createProjectLibraryWithImages', {
+    projectId, type: 1, name: '待同步角色',
+    images: [{ name: '第一版', resourceUrl: '/local-upload/image/test.png' }],
+  });
+  assert.deepEqual((await call(api, '/gw/storyboard/project/checkProjectAssetSyncConflict', {
+    projectId, libraryId: syncSource.result.id, isMerge: true,
+  })).result, []);
+  assert.equal((await call(api, '/gw/storyboard/project/syncProjectAssetLibrary', {
+    projectId, libraryId: syncSource.result.id,
+    imageIds: [syncSource.result.images[0].id],
+  })).result.characterResources.length, 1);
+  const secondImage = await call(api, '/gw/storyboard/api/createProjectLibraryImage', {
+    projectLibraryId: syncSource.result.id, name: '第二版',
+    resourceUrl: '/local-upload/image/test2.png',
+  });
+  assert.equal(secondImage.code, 0);
+  assert.equal((await call(api, '/gw/storyboard/project/checkProjectAssetSyncConflict', {
+    projectId, libraryId: syncSource.result.id, isMerge: true,
+  })).result[0].hasConflict, true);
+  assert.equal((await call(api, '/gw/storyboard/project/syncProjectAssetLibrary', {
+    projectId, libraryId: syncSource.result.id, imageIds: [secondImage.result.id, 9999999],
+    action: 'merge',
+  })).code, 400);
+  assert.equal((await call(api, '/gw/storyboard/project/syncProjectAssetLibrary', {
+    projectId, libraryId: syncSource.result.id,
+    imageIds: [secondImage.result.id, secondImage.result.id], action: 'merge',
+  })).result.characterResources.length, 2);
+  const overwritten = await call(api, '/gw/storyboard/project/syncProjectAssetLibrary', {
+    projectId, libraryId: syncSource.result.id,
+    imageIds: [syncSource.result.images[0].id], action: 'overwrite',
+  });
+  assert.equal(overwritten.result.characterResources.length, 1);
+  assert.equal(overwritten.result.characterResources[0].resourceUrl,
+    '/local-upload/image/test.png');
+  assert.equal((await call(api, '/gw/assets/resource/getParentResource', { type: 1 }))
+    .result.items.find(item => item.id === unrelated.result.id).characterResources.length, 0);
   const parentAsset = await call(api, '/gw/assets/resource/createParentResource', {
     name: '可引用角色', type: 1,
     characterResources: [{ name: '形象 1', isMain: true,
@@ -114,12 +150,32 @@ try {
   const projectAssets = await call(api, '/gw/storyboard/api/projectLibraryList', {
     projectId, type: 1,
   });
-  assert.equal(projectAssets.result.items[0].images[0].resourceUrl[0],
+  const importedProjectAsset = projectAssets.result.items.find(item =>
+    item.parentResourceId === parentAsset.result.id);
+  assert.equal(importedProjectAsset.images[0].resourceUrl[0],
     '/local-upload/image/test.png');
   const imageDetail = await call(api, '/gw/storyboard/api/getProjectLibraryImageDetail', {
-    projectId, ids: [projectAssets.result.items[0].images[0].id],
+    projectId, ids: [importedProjectAsset.images[0].id],
   });
   assert.equal(imageDetail.result[0].name, '形象 1');
+  const targetProject = await call(api, '/gw/storyboard/project/createFreeProject', {
+    name: '素材目标项目',
+  });
+  const targetProjectId = targetProject.result.projectId;
+  const transfer = await call(api, '/gw/storyboard/project/copyProjectLibrary', {
+    importProjectId: projectId, newProjectId: targetProjectId,
+    projectLibraryIds: [importedProjectAsset.id],
+  });
+  assert.equal(transfer.result.copiedProjectLibraryCount, 1);
+  assert.notEqual(transfer.result.items[0].images[0].id,
+    importedProjectAsset.images[0].id);
+  assert.equal((await call(api, '/gw/storyboard/project/copyProjectLibrary', {
+    importProjectId: projectId, newProjectId: targetProjectId,
+    projectLibraryIds: [importedProjectAsset.id],
+  })).result.copiedProjectLibraryCount, 0);
+  assert.equal((await call(api, '/gw/storyboard/api/projectLibraryList', {
+    projectId: targetProjectId,
+  })).result.total, 1);
   assert.equal((await call(api, '/gw/storyboard/project/importParentResources', {
     projectId, parentResources: [parentAsset.result],
   })).code, 409);
@@ -128,7 +184,7 @@ try {
   });
   assert.equal((await call(api, '/gw/storyboard/api/projectLibraryList', {
     projectId, type: 1,
-  })).result.total, 1);
+  })).result.items.some(item => item.id === importedProjectAsset.id), true);
   const shot = await call(api, '/gw/storyboard/api/save', {
     projectId, seriesId, originText: '测试分镜',
   });
@@ -147,6 +203,42 @@ try {
     storyBoardId: shot.result.id, type: 1,
   });
   assert.equal(history.result.items.length, 2);
+  assert.equal((await call(api, '/gw/storyboard/api/historyList', {
+    seriesId, type: 1,
+  })).result.total, 2);
+  assert.equal((await call(api, '/gw/storyboard/api/createProjectHistory', {
+    projectId, seriesId: targetProject.result.seriesId, type: 1,
+    imageList: ['/local-upload/image/test.png'],
+  })).code, 400);
+  const standaloneHistory = await call(api, '/gw/storyboard/api/createProjectHistory', {
+    projectId, seriesId, type: 1, imagePrompt: '单独保存的画面',
+    imageList: JSON.stringify(['/local-upload/image/test.png']),
+  });
+  assert.equal(standaloneHistory.code, 0);
+  assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
+    projectId, type: 1, search: '单独保存',
+  })).result.total, 1);
+  assert.equal((await call(api, '/gw/storyboard/api/updateHistoryStar', {
+    seriesId, storyBoardHistoryId: standaloneHistory.result.id, isStar: 1,
+  })).result.isStar, 1);
+  assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
+    projectId, isStar: 1,
+  })).result.total, 1);
+  assert.equal((await call(api, '/gw/storyboard/api/updateHistoryStar', {
+    seriesId, storyBoardHistoryId: history.result.items[0].id, isStar: 1,
+  })).result.isStar, 1);
+  assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
+    projectId, isStar: 1,
+  })).result.total, 2);
+  assert.equal((await call(api, '/gw/storyboard/api/updateHistoryStar', {
+    seriesId, storyBoardHistoryId: history.result.items[0].id, isStar: '0',
+  })).result.isStar, 0);
+  assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
+    projectId, isStar: 1,
+  })).result.total, 1);
+  await call(api, '/gw/storyboard/api/updateHistoryStar', {
+    seriesId, storyBoardHistoryId: history.result.items[0].id, isStar: 1,
+  });
   assert.equal((await call(api, '/gw/storyboard/api/switchMaterial', {
     seriesId, storyBoardId: shot.result.id,
     storyBoardHistoryId: history.result.items[1].id, type: 1,
@@ -157,6 +249,12 @@ try {
   assert.equal(restoredShot.imageList[0].url, '/local-upload/image/test.png');
   assert.equal((await call(api, '/gw/storyboard/series/getSeries', { projectId }))
     .result.items[0].isDetailed, 1);
+  assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
+    projectId,
+  })).result.total, 3);
+  assert.equal((await call(api, '/gw/storyboard/api/projectLibraryList', {
+    projectId: targetProjectId,
+  })).result.total, 1);
   const copied = await call(api, '/gw/storyboard/project/copyProject', { projectId });
   assert.equal(copied.code, 0);
   const copiedSeries = (await call(api, '/gw/storyboard/series/getSeries', {
@@ -165,17 +263,26 @@ try {
   const copiedShot = (await call(api, '/gw/storyboard/api/list', {
     seriesId: copiedSeries.id,
   })).result.items[0];
-  assert.equal((await call(api, '/gw/storyboard/api/projectLibraryList', {
+  const copiedProjectAssets = await call(api, '/gw/storyboard/api/projectLibraryList', {
     projectId: copied.result.id, type: 1,
-  })).result.items[0].images[0].resourceUrl[0], '/local-upload/image/test.png');
+  });
+  assert.equal(copiedProjectAssets.result.items.find(item =>
+    item.parentResourceId === parentAsset.result.id).images[0].resourceUrl[0],
+  '/local-upload/image/test.png');
   assert.equal((await call(api, '/gw/storyboard/api/historyList', {
     storyBoardId: copiedShot.id,
   })).result.items.length, 2);
+  assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
+    projectId: copied.result.id,
+  })).result.total, 3);
   await call(api, '/gw/storyboard/series/deleteSeries', { id: seriesId });
   assert.equal((await call(api, '/gw/storyboard/api/historyList', {
     storyBoardId: shot.result.id,
   })).result.items.length, 0);
-  console.log('资产导入与引用、剧集、分镜模式及素材历史的本地持久化检查通过');
+  assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
+    projectId,
+  })).result.total, 0);
+  console.log('项目素材复制与引用、项目历史、剧集及分镜的本地持久化检查通过');
 } finally {
   if (originalDataPath === undefined) delete process.env.JZZM_LOCAL_DATA;
   else process.env.JZZM_LOCAL_DATA = originalDataPath;
