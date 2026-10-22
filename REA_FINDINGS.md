@@ -11,6 +11,8 @@
 | `index-CB4bi7Oy.js` 从另一项目导入素材时传 `importProjectId`、`newProjectId`、`projectLibraryIds`；项目历史按类型、剧集、收藏和搜索词查询。 | `ev_17982baa5a0ebb5ebee12493a95a20ec43acd41ea7481bd687a5de0e1`。 | 本地素材可跨项目复制；手工保存的图片／视频进入可筛选的项目历史。 |
 | `projectDeletion-CtrPd1C1.js` 对项目素材同步先查冲突，使用 `merge` 或 `overwrite` 决定如何写入个人资产库；`index-CB4bi7Oy.js` 提交勾选的 `imageIds`。 | 全量静态分析 `ev_806781451eaf59825b9f82b4befa9a31db7b3bb751ba3794e856d0420a6dd70c`；该图部分覆盖。 | 本地按资产名称与图片文件地址判断冲突，并仅同步选中的图片；不推断原站服务端的冲突算法。 |
 | `index-CB4bi7Oy.js` 的历史侧栏按 `seriesId` 调用 `historyList`。 | 发布脚本中 `fve` 调用链的静态核对。 | 本地历史接口支持按剧集读取已有分镜素材历史。 |
+| `create-BxYumHha.js` 的 `libraryList` 接收 `projectId` 和 `type`；`index-CB4bi7Oy.js` 的素材工作台读取响应中的 `characters`。 | 发布脚本中 `fetchMaterialList` 调用链的静态核对。 | 本地返回已保存的项目素材及图片地址。 |
+| `create-BxYumHha.js` 的 `libraryHistoryList` 接收 `projectId`、`type`、`libraryId`；`switchLibraryHistory` 接收 `projectId`、`libraryId`、`libraryHistoryId`。 | 发布脚本中素材历史面板调用链的静态核对。 | 本地记录已上传图片的旧版本，并可切回旧图。 |
 
 这些是静态发布包中的调用线索，不能证明原站的响应格式、权限、运行顺序或生成算法。REA 对 189 个可达脚本做过整体清点，成功解析 188 个；语义图达到容量上限，标记为部分覆盖。完整分析 Evidence ID 为 `ev_806781451eaf59825b9f82b4befa9a31db7b3bb751ba3794e856d0420a6dd70c`。
 

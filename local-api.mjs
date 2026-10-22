@@ -4,6 +4,7 @@ import { describeSeriesMedia, prepareSeriesExport } from './local-export.mjs';
 
 const dataPath = process.env.JZZM_LOCAL_DATA || join(import.meta.dirname, 'local-data.json');
 const empty = () => ({ nextId: 1000, projects: [], series: [], shots: [], shotHistory: [], projectHistory: [],
+  libraryHistory: [],
   folders: [], library: [], resources: [], looseResources: [], canvasProjects: [], canvasFolders: [] });
 let data = empty();
 if (existsSync(dataPath)) {
@@ -26,6 +27,7 @@ data.resources ||= [];
 data.looseResources ||= [];
 data.shotHistory ||= [];
 data.projectHistory ||= [];
+data.libraryHistory ||= [];
 data.artStyles ||= [];
 data.scripts ||= [];
 data.structuredDocuments ||= {};
@@ -154,6 +156,18 @@ const localLibraryImages = (library, selectedIds = null) => (library.images || [
   .map(image => ({ image,
   url: localResourceImage(Array.isArray(image.resourceUrl)
     ? image.resourceUrl[0] : image.resourceUrl) })).filter(item => item.url);
+const recordLibraryHistory = (library, image) => {
+  const resourceUrl = localResourceImage(Array.isArray(image.resourceUrl)
+    ? image.resourceUrl[0] : image.resourceUrl);
+  if (!resourceUrl || data.libraryHistory.some(entry =>
+    entry.libraryId === library.id && entry.imageId === image.id &&
+    entry.resourceUrl === resourceUrl)) return;
+  const id = nextId();
+  data.libraryHistory.push({ id, libraryHistoryId: id, libraryId: library.id,
+    projectId: library.projectId, seriesId: library.seriesId || null,
+    imageId: image.id, type: library.type, name: image.name || library.name,
+    resourceUrl, createAt: new Date().toISOString() });
+};
 const recordShotHistory = (shot, type) => {
   const id = nextId();
   const entry = { id, storyBoardHistoryId: id, storyBoardId: shot.id,
@@ -702,10 +716,21 @@ export async function handleLocalApi(req, res, pathname) {
       }
       for (const library of data.library.filter(item => item.projectId === original.id)) {
         const libraryId = nextId();
+        const imageIds = new Map();
         data.library.push({ ...structuredClone(library), id: libraryId, projectId,
           seriesId: seriesIds.get(library.seriesId) || null,
-          images: (library.images || []).map(image => ({ ...structuredClone(image),
-            id: nextId(), projectLibraryId: libraryId })) });
+          images: (library.images || []).map(image => {
+            const imageId = nextId();
+            imageIds.set(image.id, imageId);
+            return { ...structuredClone(image), id: imageId, projectLibraryId: libraryId };
+          }) });
+        for (const history of data.libraryHistory.filter(item => item.libraryId === library.id)) {
+          const historyId = nextId();
+          data.libraryHistory.push({ ...structuredClone(history), id: historyId,
+            libraryHistoryId: historyId, libraryId, projectId,
+            seriesId: seriesIds.get(history.seriesId) || null,
+            imageId: imageIds.get(history.imageId) || null });
+        }
       }
       for (const script of data.scripts.filter(item => item.projectId === original.id)) {
         data.scripts.push({ ...structuredClone(script), id: nextId(), projectId,
@@ -750,6 +775,7 @@ export async function handleLocalApi(req, res, pathname) {
       data.shots = data.shots.filter(shot => !seriesIds.has(shot.seriesId));
       data.shotHistory = data.shotHistory.filter(item => !seriesIds.has(item.seriesId));
       data.projectHistory = data.projectHistory.filter(item => item.projectId !== id);
+      data.libraryHistory = data.libraryHistory.filter(item => item.projectId !== id);
       data.library = data.library.filter(item => item.projectId !== id);
       data.scripts = data.scripts.filter(script => script.projectId !== id);
       delete data.structuredDocuments[String(id)];
@@ -983,6 +1009,7 @@ export async function handleLocalApi(req, res, pathname) {
       data.shots = data.shots.filter(shot => shot.seriesId !== seriesId);
       data.shotHistory = data.shotHistory.filter(item => item.seriesId !== seriesId);
       data.projectHistory = data.projectHistory.filter(item => item.seriesId !== seriesId);
+      data.libraryHistory = data.libraryHistory.filter(item => item.seriesId !== seriesId);
       save();
       result = ok(true);
       break;
@@ -1016,15 +1043,25 @@ export async function handleLocalApi(req, res, pathname) {
           continue;
         }
         const libraryId = nextId();
-        const images = (source.images || []).map(image => ({ ...structuredClone(image),
-          id: nextId(), projectLibraryId: libraryId,
+        const imageIds = new Map();
+        const images = (source.images || []).map(image => {
+          const imageId = nextId();
+          imageIds.set(image.id, imageId);
+          return { ...structuredClone(image), id: imageId, projectLibraryId: libraryId,
           resourceUrl: (Array.isArray(image.resourceUrl)
-            ? image.resourceUrl : [image.resourceUrl].filter(Boolean)).map(localUploadUrl) }));
+            ? image.resourceUrl : [image.resourceUrl].filter(Boolean)).map(localUploadUrl) };
+        });
         const item = { ...structuredClone(source), id: libraryId,
           projectId: targetProjectId, seriesId: null,
           sourceProjectId, sourceProjectLibraryId: sourceId,
           images, createTime: new Date().toISOString() };
         data.library.push(item);
+        for (const history of data.libraryHistory.filter(entry => entry.libraryId === source.id)) {
+          const historyId = nextId();
+          data.libraryHistory.push({ ...structuredClone(history), id: historyId,
+            libraryHistoryId: historyId, libraryId, projectId: targetProjectId,
+            seriesId: null, imageId: imageIds.get(history.imageId) || null });
+        }
         copied.push(item);
       }
       if (copied.length) save();
@@ -1161,6 +1198,62 @@ export async function handleLocalApi(req, res, pathname) {
       result = ok(shot);
       break;
     }
+    case '/storyboard/api/libraryList': {
+      const projectId = Number(body.projectId);
+      const type = Number(body.type || 1);
+      const characters = data.library
+        .filter(item => item.projectId === projectId && item.type === type)
+        .map(item => ({ ...item, resourceUrl: (item.images || []).flatMap(image =>
+          Array.isArray(image.resourceUrl) ? image.resourceUrl :
+            [image.resourceUrl].filter(Boolean)).map(localUploadUrl) }));
+      result = ok({ characters, items: characters, total: characters.length });
+      break;
+    }
+    case '/storyboard/api/libraryHistoryList': {
+      const library = data.library.find(item =>
+        item.id === Number(body.libraryId) && item.projectId === Number(body.projectId) &&
+        (!body.type || item.type === Number(body.type)));
+      if (!library) { result = ok({ items: [], total: 0 }); break; }
+      const current = localLibraryImages(library).map(({ image, url }) => ({
+        id: -Number(image.id), libraryHistoryId: -Number(image.id),
+        libraryId: library.id, projectId: library.projectId, imageId: image.id,
+        type: library.type, name: image.name || library.name,
+        resourceUrl: url, isCurrent: true,
+        createAt: image.createTime || library.createTime,
+      }));
+      const previous = data.libraryHistory.filter(item => item.libraryId === library.id)
+        .filter(item => localResourceImage(item.resourceUrl))
+        .sort((left, right) => Date.parse(right.createAt) - Date.parse(left.createAt));
+      const items = [...current, ...previous];
+      result = ok({ items, total: items.length });
+      break;
+    }
+    case '/storyboard/api/switchLibraryHistory': {
+      const library = data.library.find(item => item.id === Number(body.libraryId) &&
+        item.projectId === Number(body.projectId));
+      const historyId = Number(body.libraryHistoryId);
+      const history = historyId > 0 ? data.libraryHistory.find(item =>
+        item.id === historyId && item.libraryId === library?.id) : null;
+      const selectedImage = historyId < 0 ? library?.images?.find(image =>
+        image.id === -historyId) : library?.images?.find(image =>
+        image.id === history?.imageId) || library?.images?.find(image => image.isMain) ||
+        library?.images?.[0];
+      const resourceUrl = historyId > 0 ? localResourceImage(history?.resourceUrl) :
+        localResourceImage(Array.isArray(selectedImage?.resourceUrl)
+          ? selectedImage.resourceUrl[0] : selectedImage?.resourceUrl);
+      if (!library || !selectedImage || !resourceUrl) {
+        result = { code: 404, msg: '项目素材历史不存在' };
+        break;
+      }
+      if (historyId > 0) {
+        recordLibraryHistory(library, selectedImage);
+        selectedImage.resourceUrl = [resourceUrl];
+      }
+      for (const image of library.images) image.isMain = Number(image.id === selectedImage.id);
+      save();
+      result = ok(library);
+      break;
+    }
     case '/storyboard/api/projectLibraryList': {
       const library = data.library.filter(item =>
         (!body.projectId || item.projectId === Number(body.projectId)) &&
@@ -1204,6 +1297,7 @@ export async function handleLocalApi(req, res, pathname) {
     }
     case '/storyboard/api/deleteProjectLibrary':
       data.library = data.library.filter(item => item.id !== id);
+      data.libraryHistory = data.libraryHistory.filter(item => item.libraryId !== id);
       save();
       result = ok(true);
       break;
@@ -1220,6 +1314,7 @@ export async function handleLocalApi(req, res, pathname) {
     case '/storyboard/api/updateProjectLibraryImage': {
       const item = data.library.find(item => item.images?.some(image => image.id === id));
       const image = item?.images.find(image => image.id === id);
+      if (image && body.resourceUrl !== undefined) recordLibraryHistory(item, image);
       if (image) Object.assign(image, body, { id: image.id,
         resourceUrl: (Array.isArray(body.resourceUrl) ? body.resourceUrl : [body.resourceUrl || image.resourceUrl].flat()).map(localUploadUrl) });
       save();
@@ -1229,6 +1324,7 @@ export async function handleLocalApi(req, res, pathname) {
     case '/storyboard/api/deleteProjectLibraryImage': {
       const item = data.library.find(item => item.images?.some(image => image.id === id));
       if (item) item.images = item.images.filter(image => image.id !== id);
+      data.libraryHistory = data.libraryHistory.filter(history => history.imageId !== id);
       save();
       result = ok(true);
       break;

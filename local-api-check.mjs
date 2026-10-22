@@ -30,6 +30,8 @@ try {
     Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==', 'base64'));
   await writeFile(join(testRoot, 'local-upload', 'image', 'test2.png'),
     Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==', 'base64'));
+  await writeFile(join(testRoot, 'local-upload', 'image', 'test3.png'),
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==', 'base64'));
   const wav = Buffer.alloc(46);
   wav.write('RIFF', 0); wav.writeUInt32LE(38, 4); wav.write('WAVEfmt ', 8);
   wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
@@ -138,6 +140,24 @@ try {
     '/local-upload/image/test.png');
   assert.equal((await call(api, '/gw/assets/resource/getParentResource', { type: 1 }))
     .result.items.find(item => item.id === unrelated.result.id).characterResources.length, 0);
+  await call(api, '/gw/storyboard/api/updateProjectLibraryImage', {
+    id: syncSource.result.images[0].id,
+    resourceUrl: ['/local-upload/image/test3.png'],
+  });
+  const libraryHistory = await call(api, '/gw/storyboard/api/libraryHistoryList', {
+    projectId, libraryId: syncSource.result.id, type: 1,
+  });
+  const originalVersion = libraryHistory.result.items.find(item =>
+    item.id > 0 && item.resourceUrl === '/local-upload/image/test.png');
+  assert.ok(originalVersion);
+  assert.equal((await call(api, '/gw/storyboard/api/switchLibraryHistory', {
+    projectId, libraryId: syncSource.result.id,
+    libraryHistoryId: originalVersion.id,
+  })).result.images[0].resourceUrl[0], '/local-upload/image/test.png');
+  assert.equal((await call(api, '/gw/storyboard/api/switchLibraryHistory', {
+    projectId, libraryId: syncSource.result.id,
+    libraryHistoryId: 9999999,
+  })).code, 404);
   const parentAsset = await call(api, '/gw/assets/resource/createParentResource', {
     name: '可引用角色', type: 1,
     characterResources: [{ name: '形象 1', isMain: true,
@@ -150,6 +170,13 @@ try {
   const projectAssets = await call(api, '/gw/storyboard/api/projectLibraryList', {
     projectId, type: 1,
   });
+  const materialStage = await call(api, '/gw/storyboard/api/libraryList', {
+    projectId, type: 1,
+  });
+  assert.equal(materialStage.result.characters.length, projectAssets.result.total);
+  assert.equal(materialStage.result.characters.some(item =>
+    item.id === syncSource.result.id &&
+    item.resourceUrl.includes('/local-upload/image/test2.png')), true);
   const importedProjectAsset = projectAssets.result.items.find(item =>
     item.parentResourceId === parentAsset.result.id);
   assert.equal(importedProjectAsset.images[0].resourceUrl[0],
@@ -176,6 +203,9 @@ try {
   assert.equal((await call(api, '/gw/storyboard/api/projectLibraryList', {
     projectId: targetProjectId,
   })).result.total, 1);
+  assert.equal((await call(api, '/gw/storyboard/api/libraryHistoryList', {
+    projectId, libraryId: syncSource.result.id, type: 1,
+  })).result.items.some(item => item.resourceUrl === '/local-upload/image/test3.png'), true);
   assert.equal((await call(api, '/gw/storyboard/project/importParentResources', {
     projectId, parentResources: [parentAsset.result],
   })).code, 409);
@@ -252,6 +282,10 @@ try {
   assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
     projectId,
   })).result.total, 3);
+  assert.equal((await call(api, '/gw/storyboard/api/libraryHistoryList', {
+    projectId, libraryId: syncSource.result.id, type: 1,
+  })).result.items.some(item =>
+    item.id > 0 && item.resourceUrl === '/local-upload/image/test3.png'), true);
   assert.equal((await call(api, '/gw/storyboard/api/projectLibraryList', {
     projectId: targetProjectId,
   })).result.total, 1);
@@ -266,6 +300,12 @@ try {
   const copiedProjectAssets = await call(api, '/gw/storyboard/api/projectLibraryList', {
     projectId: copied.result.id, type: 1,
   });
+  const copiedSyncSource = copiedProjectAssets.result.items.find(item =>
+    item.name === '待同步角色');
+  assert.equal((await call(api, '/gw/storyboard/api/libraryHistoryList', {
+    projectId: copied.result.id, libraryId: copiedSyncSource.id, type: 1,
+  })).result.items.some(item =>
+    item.id > 0 && item.resourceUrl === '/local-upload/image/test3.png'), true);
   assert.equal(copiedProjectAssets.result.items.find(item =>
     item.parentResourceId === parentAsset.result.id).images[0].resourceUrl[0],
   '/local-upload/image/test.png');
