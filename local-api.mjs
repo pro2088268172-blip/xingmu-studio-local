@@ -973,6 +973,50 @@ export async function handleLocalApi(req, res, pathname) {
     case '/storyboard/api/list':
       result = ok(list(data.shots.filter(shot => shot.seriesId === Number(body.seriesId)), body));
       break;
+    case '/storyboard/project/importParentResources': {
+      const projectId = Number(body.projectId);
+      if (!data.projects.some(project => project.id === projectId)) {
+        result = { code: 404, msg: '项目不存在' };
+        break;
+      }
+      const selected = Array.isArray(body.parentResources) ? body.parentResources : [];
+      if (!selected.length) { result = { code: 400, msg: '请先选择资产' }; break; }
+      const imported = [];
+      let skippedCount = 0;
+      for (const item of selected) {
+        const parentId = Number(typeof item === 'object' ? item?.id : item);
+        const parent = data.resources.find(resource => resource.id === parentId);
+        if (!parent || data.library.some(library =>
+          library.projectId === projectId && library.parentResourceId === parentId)) {
+          skippedCount++;
+          continue;
+        }
+        const imageInputs = (parent.characterResources || []).map(image => ({ image,
+          url: localResourceImage(Array.isArray(image.resourceUrl)
+            ? image.resourceUrl[0] : image.resourceUrl) })).filter(item => item.url);
+        if (!imageInputs.length) { skippedCount++; continue; }
+        const libraryId = nextId();
+        const images = imageInputs.map(({ image, url }) => ({
+          ...structuredClone(image), id: nextId(), projectLibraryId: libraryId,
+          parentResourceImageId: image.id, name: image.name || parent.name,
+          isMain: image.id === parent.mainResourceId || Boolean(image.isMain),
+          resourceUrl: [url],
+        }));
+        const library = { id: libraryId, projectId, seriesId: null,
+          parentResourceId: parent.id, type: parent.type, name: parent.name,
+          description: parent.description || '', isUpload: 1,
+          images, createTime: new Date().toISOString() };
+        data.library.push(library);
+        imported.push(library);
+      }
+      if (!imported.length) {
+        result = { code: 409, msg: '所选资产已导入或没有可用的本地图片' };
+      } else {
+        save();
+        result = ok({ items: imported, importedCount: imported.length, skippedCount });
+      }
+      break;
+    }
     case '/storyboard/api/changeProduceType': {
       const shot = data.shots.find(item => item.id === Number(body.storyBoardId || body.id) &&
         item.seriesId === Number(body.seriesId));

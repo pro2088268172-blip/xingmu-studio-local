@@ -102,6 +102,33 @@ try {
     .result.items.map(item => item.name), ['提示音更新']);
   const project = await call(api, '/gw/storyboard/project/createFreeProject', { name: '测试项目' });
   const { projectId, seriesId } = project.result;
+  const parentAsset = await call(api, '/gw/assets/resource/createParentResource', {
+    name: '可引用角色', type: 1,
+    characterResources: [{ name: '形象 1', isMain: true,
+      resourceUrl: '/local-upload/image/test.png' }],
+  });
+  const imported = await call(api, '/gw/storyboard/project/importParentResources', {
+    projectId, parentResources: [parentAsset.result],
+  });
+  assert.equal(imported.result.importedCount, 1);
+  const projectAssets = await call(api, '/gw/storyboard/api/projectLibraryList', {
+    projectId, type: 1,
+  });
+  assert.equal(projectAssets.result.items[0].images[0].resourceUrl[0],
+    '/local-upload/image/test.png');
+  const imageDetail = await call(api, '/gw/storyboard/api/getProjectLibraryImageDetail', {
+    projectId, ids: [projectAssets.result.items[0].images[0].id],
+  });
+  assert.equal(imageDetail.result[0].name, '形象 1');
+  assert.equal((await call(api, '/gw/storyboard/project/importParentResources', {
+    projectId, parentResources: [parentAsset.result],
+  })).code, 409);
+  await call(api, '/gw/assets/resource/deleteParentResource', {
+    ids: [parentAsset.result.id],
+  });
+  assert.equal((await call(api, '/gw/storyboard/api/projectLibraryList', {
+    projectId, type: 1,
+  })).result.total, 1);
   const shot = await call(api, '/gw/storyboard/api/save', {
     projectId, seriesId, originText: '测试分镜',
   });
@@ -138,6 +165,9 @@ try {
   const copiedShot = (await call(api, '/gw/storyboard/api/list', {
     seriesId: copiedSeries.id,
   })).result.items[0];
+  assert.equal((await call(api, '/gw/storyboard/api/projectLibraryList', {
+    projectId: copied.result.id, type: 1,
+  })).result.items[0].images[0].resourceUrl[0], '/local-upload/image/test.png');
   assert.equal((await call(api, '/gw/storyboard/api/historyList', {
     storyBoardId: copiedShot.id,
   })).result.items.length, 2);
@@ -145,7 +175,7 @@ try {
   assert.equal((await call(api, '/gw/storyboard/api/historyList', {
     storyBoardId: shot.result.id,
   })).result.items.length, 0);
-  console.log('资产、剧集、分镜模式与素材历史的本地持久化检查通过');
+  console.log('资产导入与引用、剧集、分镜模式及素材历史的本地持久化检查通过');
 } finally {
   if (originalDataPath === undefined) delete process.env.JZZM_LOCAL_DATA;
   else process.env.JZZM_LOCAL_DATA = originalDataPath;
