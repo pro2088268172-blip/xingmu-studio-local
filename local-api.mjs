@@ -48,8 +48,62 @@ const localUploadUrl = value => {
   return /^\/local-upload\/[A-Za-z0-9_./-]+$/.test(pathname) && !pathname.includes('..')
     ? pathname : value;
 };
+const localMediaList = values => Array.isArray(values) ? values.map(value =>
+  typeof value === 'string' ? localUploadUrl(value) :
+    value && typeof value === 'object' ? { ...value,
+      url: localUploadUrl(value.url), resourceUrl: localUploadUrl(value.resourceUrl) } : value) : values;
+const uploadedFile = (value, category, extensions) => {
+  const pathname = localUploadUrl(value);
+  const pattern = new RegExp(`^/local-upload/${category}/[A-Za-z0-9_-]+\\.(${extensions.join('|')})$`, 'i');
+  if (typeof pathname !== 'string' || !pattern.test(pathname)) return null;
+  const absolute = join(import.meta.dirname, pathname.slice(1));
+  return existsSync(absolute) ? { pathname, absolute } : null;
+};
+const parseSrt = source => {
+  const blocks = source.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
+    .split(/\n\s*\n/).map(block => block.trim()).filter(Boolean);
+  if (!blocks.length) throw Error('SRT 文件为空');
+  if (blocks.length > 1000) throw Error('SRT 字幕超过本地支持的 1000 条上限');
+  const cues = blocks.map((block, index) => {
+    const lines = block.split('\n');
+    const times = lines[1]?.match(/^(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})$/);
+    if (!times || !lines[0]?.trim()) throw Error(`第 ${index + 1} 条字幕格式错误`);
+    const milliseconds = value => {
+      const [hours, minutes, seconds, fraction] = value.split(/[:,.]/).map(Number);
+      if (minutes > 59 || seconds > 59) throw Error(`第 ${index + 1} 条字幕时间格式错误`);
+      return ((hours * 60 + minutes) * 60 + seconds) * 1000 + fraction;
+    };
+    const startMs = milliseconds(times[1]);
+    const endMs = milliseconds(times[2]);
+    const text = lines.slice(2).join('\n').trim();
+    if (!text) throw Error(`第 ${index + 1} 条字幕缺少内容`);
+    if (endMs <= startMs) throw Error(`第 ${index + 1} 条字幕结束时间必须晚于开始时间`);
+    return { index: index + 1, startMs, endMs,
+      startTime: times[1].replace('.', ','), endTime: times[2].replace('.', ','), text };
+  });
+  for (let index = 0; index < cues.length - 1; index++) {
+    const current = cues[index];
+    const next = cues[index + 1];
+    const gap = next.startMs - current.endMs;
+    if (gap > 700) throw Error(`第 ${index + 1} 与 ${index + 2} 条字幕之间超过 700ms`);
+    if (gap < 0) throw Error(`第 ${index + 1} 与 ${index + 2} 条字幕时间重叠`);
+    if (gap > 0) {
+      current.endMs = next.startMs;
+      current.endTime = next.startTime;
+    }
+  }
+  return cues;
+};
 for (const project of data.projects) if (project.scriptUrl)
   project.scriptUrl = localUploadUrl(project.scriptUrl);
+for (const series of data.series) {
+  series.subtitleFiles = localMediaList(series.subtitleFiles);
+  series.dubbingFiles = localMediaList(series.dubbingFiles);
+}
+for (const shot of data.shots) {
+  shot.imageList = localMediaList(shot.imageList);
+  shot.videoList = localMediaList(shot.videoList);
+}
 for (const script of data.scripts) if (script.remoteUrl)
   script.remoteUrl = localUploadUrl(script.remoteUrl);
 for (const item of data.library) for (const image of item.images || []) {
@@ -89,7 +143,7 @@ const list = (items, payload = {}) => {
 };
 const createProject = (body, modeType) => {
   const projectId = nextId();
-  const seriesId = nextId();
+  const seriesId = modeType === 0 ? null : nextId();
   const name = String(body.name || '未命名项目').trim();
   const now = new Date().toISOString();
   const project = { ...body, id: projectId, projectId, userId: 1,
@@ -98,7 +152,7 @@ const createProject = (body, modeType) => {
     createTime: now, createdAt: now, updateTime: now, updatedAt: now };
   if (body.scriptUrl) project.scriptUrl = localUploadUrl(body.scriptUrl);
   data.projects.push(project);
-  data.series.push({ id: seriesId, seriesId, projectId, name: '第1集',
+  if (seriesId) data.series.push({ id: seriesId, seriesId, projectId, name: '第1集',
     title: '第1集', sort: 1, timeDuration: 0,
     totalStoryBoardCount: 0, completedStoryBoardCount: 0 });
   save();
@@ -634,19 +688,59 @@ export async function handleLocalApi(req, res, pathname) {
     case '/storyboard/series/createSeries':
     case '/storyboard/project/createSeries': {
       const projectId = Number(body.projectId);
+      const project = data.projects.find(item => item.id === projectId);
+      if (!project) { result = { code: 404, msg: '项目不存在' }; break; }
+      const subtitleInputs = Array.isArray(body.subtitleFiles) ? body.subtitleFiles : [];
+      const dubbingInputs = Array.isArray(body.dubbingFiles) ? body.dubbingFiles : [];
+      let cues = [];
+      let subtitleFiles = [];
+      let dubbingFiles = [];
+      if (project.modeType === 0 || subtitleInputs.length || dubbingInputs.length) {
+        if (subtitleInputs.length !== 1 || dubbingInputs.length !== 1) {
+          result = { code: 400, msg: '请各上传一个 SRT 字幕和 WAV 或 MP3 配音文件' };
+          break;
+        }
+        const subtitle = uploadedFile(subtitleInputs[0], 'srt', ['srt']);
+        const dubbing = uploadedFile(dubbingInputs[0], 'dubbing', ['wav', 'mp3']);
+        if (!subtitle || !dubbing) {
+          result = { code: 400, msg: '字幕或配音文件不存在，请重新上传' };
+          break;
+        }
+        try { cues = parseSrt(readFileSync(subtitle.absolute, 'utf8')); }
+        catch (error) { result = { code: 400, msg: error.message }; break; }
+        subtitleFiles = [subtitle.pathname];
+        dubbingFiles = [dubbing.pathname];
+      }
       const seriesId = nextId();
       const index = data.series.filter(series => series.projectId === projectId).length + 1;
       const name = String(body.name || body.title || `第${index}集`);
       const series = { id: seriesId, seriesId, projectId, name, title: name, sort: index,
-        timeDuration: 0, totalStoryBoardCount: 0, completedStoryBoardCount: 0 };
+        subtitleFiles, dubbingFiles, timeDuration: 0,
+        totalStoryBoardCount: 0, completedStoryBoardCount: 0 };
       data.series.push(series);
+      for (const cue of cues) {
+        const shotId = nextId();
+        data.shots.push({ id: shotId, storyBoardId: shotId, seriesId, projectId,
+          boardIndex: cue.index, name: `分镜${cue.index}`, shotTitle: `分镜${cue.index}`,
+          produceType: 1, startTime: cue.startTime,
+          duration: (cue.endMs - cue.startMs) / 1000,
+          originText: cue.text, content: cue.text,
+          narrationList: [{ index: 0, startTime: cue.startTime,
+            endTime: cue.endTime, text: cue.text }],
+          imageList: [], videoList: [], imagePrompt: '', videoPrompt: '' });
+      }
+      renumberShots(seriesId);
       save();
       result = ok(series);
       break;
     }
     case '/storyboard/series/updateSeries': {
       const series = data.series.find(item => item.id === id);
-      if (series) Object.assign(series, body, { id: series.id, seriesId: series.id });
+      if (series) Object.assign(series, body, {
+        subtitleFiles: localMediaList(body.subtitleFiles ?? series.subtitleFiles),
+        dubbingFiles: localMediaList(body.dubbingFiles ?? series.dubbingFiles),
+        id: series.id, seriesId: series.id,
+      });
       save();
       result = ok(series || null);
       break;
@@ -745,12 +839,15 @@ export async function handleLocalApi(req, res, pathname) {
     case '/storyboard/api/save': {
       const shotId = Number(body.id || body.storyBoardId) || nextId();
       let shot = data.shots.find(item => item.id === shotId);
-      if (shot) Object.assign(shot, body, { id: shotId });
+      const fields = { ...body };
+      if (fields.imageList) fields.imageList = localMediaList(fields.imageList);
+      if (fields.videoList) fields.videoList = localMediaList(fields.videoList);
+      if (shot) Object.assign(shot, fields, { id: shotId });
       else {
         const boardIndex = data.shots.filter(item => item.seriesId === Number(body.seriesId)).length + 1;
         shot = { boardIndex, name: `分镜${boardIndex}`, shotTitle: `分镜${boardIndex}`,
           produceType: 1, duration: 2, imageList: [], videoList: [], imagePrompt: '', videoPrompt: '',
-          ...body, id: shotId, storyBoardId: shotId, seriesId: Number(body.seriesId) };
+          ...fields, id: shotId, storyBoardId: shotId, seriesId: Number(body.seriesId) };
         data.shots.push(shot);
       }
       renumberShots(shot.seriesId);
@@ -797,6 +894,15 @@ export async function handleLocalApi(req, res, pathname) {
     }
     case '/storyboard/api/initial':
       result = ok({ items: [], total: 0 });
+      break;
+    case '/storyboard/api/getPromptTemplate':
+      result = ok({ templateList: [] });
+      break;
+    case '/storyboard/api/characterPromptTaskStatus':
+      result = ok({ status: 0 });
+      break;
+    case '/storyboard/api/listImageVideo':
+      result = { code: 501, msg: '剪映草稿导出需要本地导出服务，当前尚未接入' };
       break;
     case '/storyboard/plaza/home':
       result = ok({ banners: [], recommendations: [], items: [] });

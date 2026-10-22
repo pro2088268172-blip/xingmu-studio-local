@@ -29,6 +29,9 @@ const mimeTypes = {
   '.ttf': 'font/ttf',
   '.glb': 'model/gltf-binary',
   '.mp4': 'video/mp4',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.srt': 'application/x-subrip; charset=utf-8',
 };
 
 async function serveLocal(req, res, pathname) {
@@ -54,13 +57,44 @@ async function serveLocal(req, res, pathname) {
   if (!existsSync(absolute)) return false;
   const info = await stat(absolute);
   if (!info.isFile()) return false;
+  const extension = extname(absolute).toLowerCase();
+  const isMedia = ['.mp4', '.mp3', '.wav'].includes(extension);
   const headers = {
-    'content-type': mimeTypes[extname(absolute).toLowerCase()] || 'application/octet-stream',
+    'content-type': mimeTypes[extension] || 'application/octet-stream',
     'content-length': info.size,
     'cache-control': decoded.startsWith(assetPrefix) ? 'public, max-age=3600' : 'no-store',
   };
-  if (extname(absolute).toLowerCase() === '.html') {
+  if (isMedia) headers['accept-ranges'] = 'bytes';
+  if (extension === '.html') {
     headers['content-security-policy'] = `default-src 'self' data: blob:; connect-src 'self' ws://${host}:${port}; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob: data:; worker-src 'self' blob:; frame-src 'self' blob:`;
+  }
+  if (isMedia && req.headers.range) {
+    const match = String(req.headers.range).match(/^bytes=(\d*)-(\d*)$/);
+    let start;
+    let end;
+    if (match && (match[1] || match[2])) {
+      if (match[1]) {
+        start = Number(match[1]);
+        end = match[2] ? Number(match[2]) : info.size - 1;
+      } else {
+        const suffix = Number(match[2]);
+        start = Math.max(0, info.size - suffix);
+        end = info.size - 1;
+      }
+    }
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+        start < 0 || start >= info.size || end < start) {
+      res.writeHead(416, { 'content-range': `bytes */${info.size}` });
+      res.end();
+      return true;
+    }
+    end = Math.min(end, info.size - 1);
+    headers['content-range'] = `bytes ${start}-${end}/${info.size}`;
+    headers['content-length'] = end - start + 1;
+    res.writeHead(206, headers);
+    if (req.method === 'HEAD') res.end();
+    else createReadStream(absolute, { start, end }).pipe(res);
+    return true;
   }
   res.writeHead(200, headers);
   if (req.method === 'HEAD') res.end();
@@ -74,7 +108,7 @@ async function receiveUpload(req, res) {
   let length = 0;
   for await (const chunk of req) {
     length += chunk.length;
-    if (length > 25 * 1024 * 1024) { res.writeHead(413); res.end(); return; }
+    if (length > 64 * 1024 * 1024) { res.writeHead(413); res.end(); return; }
     chunks.push(chunk);
   }
   const form = await new Request('http://127.0.0.1/local-upload', {
