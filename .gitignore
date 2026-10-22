@@ -1,0 +1,15 @@
+/ai_comic/
+/resourceBucket/
+/plaza-assets/
+/local-upload/
+/local-data.json
+/local-data.json.tmp
+/qa-*
+/public-access.json
+/offline-assets-manifest.json
+/prepare-offline-assets.mjs
+/canvas-bg.webp
+/score.svg
+/Sparkles.svg
+*.zip
+node_modules/
