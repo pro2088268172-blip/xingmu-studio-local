@@ -31,6 +31,8 @@ const mimeTypes = {
   '.mp4': 'video/mp4',
   '.mp3': 'audio/mpeg',
   '.wav': 'audio/wav',
+  '.aac': 'audio/aac',
+  '.m4a': 'audio/mp4',
   '.srt': 'application/x-subrip; charset=utf-8',
 };
 
@@ -58,7 +60,7 @@ async function serveLocal(req, res, pathname) {
   const info = await stat(absolute);
   if (!info.isFile()) return false;
   const extension = extname(absolute).toLowerCase();
-  const isMedia = ['.mp4', '.mp3', '.wav'].includes(extension);
+  const isMedia = ['.mp4', '.mp3', '.wav', '.aac', '.m4a'].includes(extension);
   const headers = {
     'content-type': mimeTypes[extension] || 'application/octet-stream',
     'content-length': info.size,

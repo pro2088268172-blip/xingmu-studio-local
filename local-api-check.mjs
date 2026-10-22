@@ -41,6 +41,8 @@ try {
   wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34);
   wav.write('data', 36); wav.writeUInt32LE(2, 40);
   await writeFile(join(testRoot, 'local-upload', 'material', 'tone.wav'), wav);
+  await writeFile(join(testRoot, 'local-upload', 'material', 'tone.aac'), Buffer.from([0xff, 0xf1]));
+  await writeFile(join(testRoot, 'local-upload', 'material', 'tone.m4a'), Buffer.from('local-audio-fixture'));
   process.env.JZZM_LOCAL_DATA = testDataPath;
   const moduleUrl = pathToFileURL(join(testRoot, 'local-api.mjs')).href;
   let api = (await import(moduleUrl)).handleLocalApi;
@@ -130,6 +132,15 @@ try {
   assert.equal((await call(api, '/gw/storyboard/voiceTone/detail', {
     id: customVoice.result.id,
   })).code, 404);
+  for (const extension of ['aac', 'm4a']) {
+    const item = await call(api, '/gw/storyboard/voiceTone/createMine', {
+      name: `测试 ${extension}`, voiceUrl: `/local-upload/material/tone.${extension}`,
+    });
+    assert.equal(item.result.voiceUrl, `/local-upload/material/tone.${extension}`);
+    assert.equal((await call(api, '/gw/storyboard/voiceTone/deleteMine', {
+      id: item.result.id,
+    })).code, 0);
+  }
   const project = await call(api, '/gw/storyboard/project/createFreeProject', { name: '测试项目' });
   const { projectId, seriesId } = project.result;
   assert.equal((await call(api, '/gw/storyboard/project/editNewFreeProject', {

@@ -93,7 +93,7 @@ const localResourceImage = value => {
 const localResourceMedia = value => {
   const pathname = localUploadUrl(value);
   if (typeof pathname !== 'string' ||
-      !/^\/local-upload\/[A-Za-z0-9_./-]+\.(png|jpe?g|webp|avif|mp3|wav|mp4)$/i.test(pathname) ||
+      !/^\/local-upload\/[A-Za-z0-9_./-]+\.(png|jpe?g|webp|avif|mp3|wav|aac|m4a|mp4)$/i.test(pathname) ||
       pathname.includes('..')) return null;
   return existsSync(join(import.meta.dirname, pathname.slice(1))) ? pathname : null;
 };
@@ -641,7 +641,7 @@ export async function handleLocalApi(req, res, pathname) {
     case '/storyboard/voiceTone/createMine': {
       const name = String(body.name || '').trim();
       const voiceUrl = localResourceMedia(body.voiceUrl);
-      if (!name || !voiceUrl || !/\.(mp3|wav)$/i.test(voiceUrl)) {
+      if (!name || !voiceUrl || !/\.(mp3|wav|aac|m4a)$/i.test(voiceUrl)) {
         result = { code: 400, msg: '音色名称或本地音频文件无效' };
         break;
       }
@@ -661,7 +661,7 @@ export async function handleLocalApi(req, res, pathname) {
       const name = body.name === undefined ? voice.name : String(body.name).trim();
       const voiceUrl = body.voiceUrl === undefined ? voice.voiceUrl :
         localResourceMedia(body.voiceUrl);
-      if (!name || !voiceUrl || !/\.(mp3|wav)$/i.test(voiceUrl)) {
+      if (!name || !voiceUrl || !/\.(mp3|wav|aac|m4a)$/i.test(voiceUrl)) {
         result = { code: 400, msg: '音色名称或本地音频文件无效' };
         break;
       }
