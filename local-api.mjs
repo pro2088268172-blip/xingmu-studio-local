@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { describeSeriesMedia, prepareSeriesExport } from './local-export.mjs';
 
 const dataPath = process.env.JZZM_LOCAL_DATA || join(import.meta.dirname, 'local-data.json');
-const empty = () => ({ nextId: 1000, projects: [], series: [], shots: [], folders: [], library: [], resources: [], canvasProjects: [], canvasFolders: [] });
+const empty = () => ({ nextId: 1000, projects: [], series: [], shots: [], shotHistory: [],
+  folders: [], library: [], resources: [], looseResources: [], canvasProjects: [], canvasFolders: [] });
 let data = empty();
 if (existsSync(dataPath)) {
   try { data = { ...empty(), ...JSON.parse(readFileSync(dataPath, 'utf8')) }; }
@@ -22,6 +23,8 @@ data.canvasProjects ||= [];
 data.canvasFolders ||= [];
 data.canvasDocuments ||= {};
 data.resources ||= [];
+data.looseResources ||= [];
+data.shotHistory ||= [];
 data.artStyles ||= [];
 data.scripts ||= [];
 data.structuredDocuments ||= {};
@@ -59,6 +62,20 @@ const uploadedFile = (value, category, extensions) => {
   if (typeof pathname !== 'string' || !pattern.test(pathname)) return null;
   const absolute = join(import.meta.dirname, pathname.slice(1));
   return existsSync(absolute) ? { pathname, absolute } : null;
+};
+const localResourceImage = value => {
+  const pathname = localUploadUrl(value);
+  if (typeof pathname !== 'string' ||
+      !/^\/local-upload\/[A-Za-z0-9_./-]+\.(png|jpe?g|webp|avif)$/i.test(pathname) ||
+      pathname.includes('..')) return null;
+  return existsSync(join(import.meta.dirname, pathname.slice(1))) ? pathname : null;
+};
+const localResourceMedia = value => {
+  const pathname = localUploadUrl(value);
+  if (typeof pathname !== 'string' ||
+      !/^\/local-upload\/[A-Za-z0-9_./-]+\.(png|jpe?g|webp|avif|mp3|wav|mp4)$/i.test(pathname) ||
+      pathname.includes('..')) return null;
+  return existsSync(join(import.meta.dirname, pathname.slice(1))) ? pathname : null;
 };
 const parseSrt = source => {
   const blocks = source.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
@@ -127,6 +144,22 @@ const renumberShots = seriesId => {
 for (const series of data.series) renumberShots(series.id);
 
 const nextId = () => ++data.nextId;
+const recordShotHistory = (shot, type) => {
+  const id = nextId();
+  const entry = { id, storyBoardHistoryId: id, storyBoardId: shot.id,
+    seriesId: shot.seriesId, projectId: shot.projectId, type, historyType: type,
+    produceType: shot.produceType, imageList: structuredClone(shot.imageList || []),
+    videoList: structuredClone(shot.videoList || []),
+    audioList: structuredClone(shot.audioList || []),
+    createTime: new Date().toISOString() };
+  data.shotHistory.push(entry);
+  const history = data.shotHistory.filter(item => item.storyBoardId === shot.id);
+  if (history.length > 50) {
+    const expired = new Set(history.slice(0, history.length - 50).map(item => item.id));
+    data.shotHistory = data.shotHistory.filter(item => !expired.has(item.id));
+  }
+  return entry;
+};
 const save = () => {
   const temporary = `${dataPath}.tmp`;
   writeFileSync(temporary, JSON.stringify(data, null, 2));
@@ -285,7 +318,21 @@ export async function handleLocalApi(req, res, pathname) {
       if (body.type) resources = resources.filter(item => item.type === Number(body.type));
       if (search) resources = resources.filter(item =>
         `${item.name} ${item.description || ''} ${(item.tags || []).join(' ')}`.toLowerCase().includes(search));
-      if (body.isStar) resources = resources.filter(item => item.isStar);
+      if (Number(body.isStar) === 1) resources = resources.filter(item => item.isStar);
+      if (Number(body.isStar) === 2) resources = resources.filter(item => !item.isStar);
+      result = ok(list(resources, { ...body, size: body.size || body.pageSize || 30 }));
+      break;
+    }
+    case '/user/resource/getResource': {
+      const search = String(body.like || body.name || '').trim().toLowerCase();
+      let resources = [...data.looseResources].reverse();
+      if (Number(body.type) > 0)
+        resources = resources.filter(item => item.type === Number(body.type));
+      if (body.source) resources = resources.filter(item => item.source === body.source);
+      if (Number(body.isStar) === 1) resources = resources.filter(item => item.isStar);
+      if (Number(body.isStar) === 2) resources = resources.filter(item => !item.isStar);
+      if (search) resources = resources.filter(item =>
+        `${item.name} ${item.description || ''}`.toLowerCase().includes(search));
       result = ok(list(resources, { ...body, size: body.size || body.pageSize || 30 }));
       break;
     }
@@ -297,11 +344,42 @@ export async function handleLocalApi(req, res, pathname) {
       }));
       const resource = { ...body, id: parentId, source: String(body.source || 'private'),
         type: Number(body.type || 1), name: String(body.name || '未命名资产'),
-        characterResources: images, isStar: false,
+        characterResources: images,
+        mainResourceId: images.find(image => image.isMain)?.id || images[0]?.id || null,
+        isStar: false,
         createTime: new Date().toISOString(), updateTime: new Date().toISOString() };
       data.resources.push(resource);
       save();
       result = ok(resource);
+      break;
+    }
+    case '/user/resource/createResourceFromLocalFile':
+    case '/user/resource/createResource': {
+      const type = Number(body.type ?? 1);
+      const grouped = [1, 2, 3].includes(type);
+      const url = grouped ? localResourceImage(body.resourceUrl) : localResourceMedia(body.resourceUrl);
+      if (!url) { result = { code: 400, msg: '请先上传本地素材文件' }; break; }
+      const now = new Date().toISOString();
+      const name = String(body.name || '未命名资产').trim() || '未命名资产';
+      if (!grouped) {
+        const resource = { ...body, id: nextId(), type, source: 'private',
+          resourceUrl: url, name, isStar: false, createTime: now, updateTime: now };
+        data.looseResources.push(resource);
+        save();
+        result = ok(resource);
+        break;
+      }
+      const parentId = nextId();
+      const imageId = nextId();
+      const image = { ...body, id: imageId, parentResourceId: parentId,
+        resourceUrl: url, name, isMain: true, createTime: now, updateTime: now };
+      const resource = { id: parentId, source: 'private', type,
+        name, description: String(body.description || ''), tags: body.tags || [],
+        mainResourceId: imageId, characterResources: [image], isStar: false,
+        isHidden: false, createTime: now, updateTime: now };
+      data.resources.push(resource);
+      save();
+      result = ok(image);
       break;
     }
     case '/assets/resource/updateParentResource': {
@@ -325,14 +403,117 @@ export async function handleLocalApi(req, res, pathname) {
       result = ok(true);
       break;
     }
+    case '/user/resource/deleteResource':
+    case '/assets/resource/deleteParentSubResource': {
+      const ids = new Set((Array.isArray(body.ids) ? body.ids : [body.id || body.resourceId])
+        .map(Number).filter(Number.isSafeInteger));
+      let changed = false;
+      const emptyParents = new Set();
+      for (const resource of data.resources) {
+        const images = resource.characterResources || [];
+        const remaining = images.filter(image => !ids.has(image.id));
+        if (remaining.length === images.length) continue;
+        resource.characterResources = remaining;
+        if (!remaining.length) emptyParents.add(resource.id);
+        if (ids.has(resource.mainResourceId)) {
+          resource.mainResourceId = remaining[0]?.id || null;
+          for (const image of remaining) image.isMain = image.id === resource.mainResourceId;
+        }
+        resource.updateTime = new Date().toISOString();
+        changed = true;
+      }
+      data.resources = data.resources.filter(resource =>
+        !ids.has(resource.id) && !emptyParents.has(resource.id));
+      data.looseResources = data.looseResources.filter(resource => !ids.has(resource.id));
+      if (changed || ids.size) save();
+      result = ok(true);
+      break;
+    }
+    case '/assets/resource/updateParentSubResource':
+    case '/user/resource/updateResource': {
+      const imageId = Number(body.id || body.resourceId);
+      const loose = data.looseResources.find(item => item.id === imageId);
+      if (loose) {
+        const resourceUrl = body.resourceUrl === undefined ? loose.resourceUrl
+          : localResourceMedia(Array.isArray(body.resourceUrl) ? body.resourceUrl[0] : body.resourceUrl);
+        if (!resourceUrl) { result = { code: 400, msg: '本地素材文件不存在' }; break; }
+        Object.assign(loose, body, { id: imageId, resourceUrl,
+          updateTime: new Date().toISOString() });
+        save();
+        result = ok(loose);
+        break;
+      }
+      const parent = data.resources.find(resource =>
+        resource.characterResources?.some(image => image.id === imageId));
+      const image = parent?.characterResources.find(item => item.id === imageId);
+      if (!image) { result = { code: 404, msg: '资产图片不存在' }; break; }
+      const resourceUrl = body.resourceUrl === undefined ? image.resourceUrl
+        : localResourceImage(Array.isArray(body.resourceUrl) ? body.resourceUrl[0] : body.resourceUrl);
+      if (!resourceUrl) { result = { code: 400, msg: '本地图片文件不存在' }; break; }
+      Object.assign(image, body, { id: imageId, parentResourceId: parent.id,
+        resourceUrl, updateTime: new Date().toISOString() });
+      parent.updateTime = image.updateTime;
+      save();
+      result = ok(image);
+      break;
+    }
+    case '/user/resource/updateResourceName': {
+      const resourceId = Number(body.id || body.resourceId);
+      const loose = data.looseResources.find(item => item.id === resourceId);
+      const parent = data.resources.find(item => item.id === resourceId ||
+        item.characterResources?.some(image => image.id === resourceId));
+      const resource = loose || parent?.characterResources?.find(image => image.id === resourceId) || parent;
+      if (!resource) { result = { code: 404, msg: '资产不存在' }; break; }
+      const name = String(body.name || '').trim();
+      if (!name) { result = { code: 400, msg: '资产名称不能为空' }; break; }
+      resource.name = name;
+      resource.updateTime = new Date().toISOString();
+      if (parent && resource !== parent) parent.updateTime = resource.updateTime;
+      save();
+      result = ok(resource);
+      break;
+    }
+    case '/user/resource/updateParentResourceName': {
+      const resource = data.resources.find(item => item.id === Number(body.id || body.parentResourceId));
+      if (!resource) { result = { code: 404, msg: '资产不存在' }; break; }
+      const name = String(body.name || '').trim();
+      if (!name) { result = { code: 400, msg: '资产名称不能为空' }; break; }
+      resource.name = name;
+      resource.updateTime = new Date().toISOString();
+      save();
+      result = ok(resource);
+      break;
+    }
+    case '/assets/resource/setParentResourceHidden':
+    case '/assets/resource/setParentResourceVisibleScope': {
+      const resource = data.resources.find(item => item.id === Number(body.id || body.parentResourceId));
+      if (!resource) { result = { code: 404, msg: '资产不存在' }; break; }
+      if (path.endsWith('Hidden')) resource.isHidden = Boolean(body.isHidden);
+      else resource.visibleScope = body.visibleScope;
+      resource.updateTime = new Date().toISOString();
+      save();
+      result = ok({ item: resource });
+      break;
+    }
+    case '/user/resource/parentFavorites': {
+      const resource = data.resources.find(item => item.id === Number(body.id || body.parentResourceId));
+      if (!resource) { result = { code: 404, msg: '资产不存在' }; break; }
+      resource.isStar = body.isStar === undefined ? !resource.isStar : Boolean(body.isStar);
+      resource.updateTime = new Date().toISOString();
+      save();
+      result = ok(resource);
+      break;
+    }
     case '/user/resource/getResourceInfo': {
       const resourceId = Number(body.resourceId || body.id);
-      result = ok(data.resources.find(item => item.id === resourceId ||
-        item.characterResources?.some(image => image.id === resourceId)) || null);
+      result = ok(data.looseResources.find(item => item.id === resourceId) ||
+        data.resources.find(item => item.id === resourceId ||
+          item.characterResources?.some(image => image.id === resourceId)) || null);
       break;
     }
     case '/user/resource/starResource': {
-      const resource = data.resources.find(item => item.id === id);
+      const resource = data.resources.find(item => item.id === id) ||
+        data.looseResources.find(item => item.id === id);
       if (resource) { resource.isStar = !resource.isStar; save(); }
       result = ok(resource || null);
       break;
@@ -341,7 +522,13 @@ export async function handleLocalApi(req, res, pathname) {
       const resource = data.resources.find(item => item.id === Number(body.parentId || body.parentResourceId || body.id));
       if (resource) {
         const imageId = Number(body.resourceId || body.subResourceId || body.characterResourceId);
+        if (!resource.characterResources?.some(image => image.id === imageId)) {
+          result = { code: 404, msg: '主形象图片不存在' };
+          break;
+        }
         for (const image of resource.characterResources || []) image.isMain = image.id === imageId;
+        resource.mainResourceId = imageId;
+        resource.updateTime = new Date().toISOString();
         save();
       }
       result = ok(resource || null);
@@ -477,6 +664,7 @@ export async function handleLocalApi(req, res, pathname) {
         createTime: now, createdAt: now, updateTime: now, updatedAt: now };
       data.projects.push(copy);
       const seriesIds = new Map();
+      const shotIds = new Map();
       for (const series of data.series.filter(item => item.projectId === original.id)) {
         const seriesId = nextId();
         seriesIds.set(series.id, seriesId);
@@ -484,8 +672,15 @@ export async function handleLocalApi(req, res, pathname) {
       }
       for (const shot of data.shots.filter(item => seriesIds.has(item.seriesId))) {
         const shotId = nextId();
+        shotIds.set(shot.id, shotId);
         data.shots.push({ ...structuredClone(shot), id: shotId, storyBoardId: shotId,
           seriesId: seriesIds.get(shot.seriesId), projectId });
+      }
+      for (const history of data.shotHistory.filter(item => shotIds.has(item.storyBoardId))) {
+        const historyId = nextId();
+        data.shotHistory.push({ ...structuredClone(history), id: historyId,
+          storyBoardHistoryId: historyId, storyBoardId: shotIds.get(history.storyBoardId),
+          seriesId: seriesIds.get(history.seriesId), projectId });
       }
       for (const library of data.library.filter(item => item.projectId === original.id)) {
         const libraryId = nextId();
@@ -535,6 +730,7 @@ export async function handleLocalApi(req, res, pathname) {
       data.projects = data.projects.filter(project => project.id !== id);
       data.series = data.series.filter(series => series.projectId !== id);
       data.shots = data.shots.filter(shot => !seriesIds.has(shot.seriesId));
+      data.shotHistory = data.shotHistory.filter(item => !seriesIds.has(item.seriesId));
       data.library = data.library.filter(item => item.projectId !== id);
       data.scripts = data.scripts.filter(script => script.projectId !== id);
       delete data.structuredDocuments[String(id)];
@@ -687,6 +883,21 @@ export async function handleLocalApi(req, res, pathname) {
     case '/storyboard/series/getSeriesInfo':
       result = ok(data.series.find(series => series.id === id) || null);
       break;
+    case '/storyboard/series/setDetailedSeries': {
+      const projectId = Number(body.projectId);
+      const detailedCount = Number(body.detailedCount);
+      if (!data.projects.some(project => project.id === projectId) ||
+          !Number.isSafeInteger(detailedCount) || detailedCount < 0) {
+        result = { code: 400, msg: '项目或剧集设置无效' };
+        break;
+      }
+      const series = data.series.filter(item => item.projectId === projectId)
+        .sort((left, right) => Number(left.sort) - Number(right.sort));
+      series.forEach((item, index) => { item.isDetailed = detailedCount > index + 1 ? 1 : 0; });
+      save();
+      result = ok(true);
+      break;
+    }
     case '/storyboard/series/createSeries':
     case '/storyboard/project/createSeries': {
       const projectId = Number(body.projectId);
@@ -747,18 +958,34 @@ export async function handleLocalApi(req, res, pathname) {
       result = ok(series || null);
       break;
     }
-    case '/storyboard/series/deleteSeries':
-      data.series = data.series.filter(series => series.id !== id);
-      data.shots = data.shots.filter(shot => shot.seriesId !== id);
+    case '/storyboard/series/deleteSeries': {
+      const seriesId = Number(body.id ?? body.seriesId);
+      data.series = data.series.filter(series => series.id !== seriesId);
+      data.shots = data.shots.filter(shot => shot.seriesId !== seriesId);
+      data.shotHistory = data.shotHistory.filter(item => item.seriesId !== seriesId);
       save();
       result = ok(true);
       break;
+    }
     case '/storyboard/series/checkSeriesName':
       result = ok({ exists: data.series.some(series => series.projectId === Number(body.projectId) && series.name === body.name) });
       break;
     case '/storyboard/api/list':
       result = ok(list(data.shots.filter(shot => shot.seriesId === Number(body.seriesId)), body));
       break;
+    case '/storyboard/api/changeProduceType': {
+      const shot = data.shots.find(item => item.id === Number(body.storyBoardId || body.id) &&
+        item.seriesId === Number(body.seriesId));
+      const produceType = Number(body.produceType);
+      if (!shot || ![1, 2].includes(produceType)) {
+        result = { code: 400, msg: '分镜或创作模式无效' };
+        break;
+      }
+      shot.produceType = produceType;
+      save();
+      result = ok(shot);
+      break;
+    }
     case '/storyboard/api/projectLibraryList': {
       const library = data.library.filter(item =>
         (!body.projectId || item.projectId === Number(body.projectId)) &&
@@ -844,14 +1071,22 @@ export async function handleLocalApi(req, res, pathname) {
       const fields = { ...body };
       if (fields.imageList) fields.imageList = localMediaList(fields.imageList);
       if (fields.videoList) fields.videoList = localMediaList(fields.videoList);
+      const oldImageList = JSON.stringify(shot?.imageList || []);
+      const oldVideoList = JSON.stringify(shot?.videoList || []);
       if (shot) Object.assign(shot, fields, { id: shotId });
       else {
         const boardIndex = data.shots.filter(item => item.seriesId === Number(body.seriesId)).length + 1;
+        const parentSeries = data.series.find(item => item.id === Number(body.seriesId));
         shot = { boardIndex, name: `分镜${boardIndex}`, shotTitle: `分镜${boardIndex}`,
           produceType: 1, duration: 2, imageList: [], videoList: [], imagePrompt: '', videoPrompt: '',
-          ...fields, id: shotId, storyBoardId: shotId, seriesId: Number(body.seriesId) };
+          ...fields, id: shotId, storyBoardId: shotId, seriesId: Number(body.seriesId),
+          projectId: Number(body.projectId || parentSeries?.projectId) };
         data.shots.push(shot);
       }
+      if (Array.isArray(fields.imageList) && fields.imageList.length &&
+          JSON.stringify(fields.imageList) !== oldImageList) recordShotHistory(shot, 1);
+      if (Array.isArray(fields.videoList) && fields.videoList.length &&
+          JSON.stringify(fields.videoList) !== oldVideoList) recordShotHistory(shot, 2);
       renumberShots(shot.seriesId);
       save();
       result = ok(shot);
@@ -876,6 +1111,7 @@ export async function handleLocalApi(req, res, pathname) {
         changed = shot;
       } else if (actionType === 2 && target && shots.length > 1) {
         data.shots.splice(data.shots.indexOf(target), 1);
+        data.shotHistory = data.shotHistory.filter(item => item.storyBoardId !== target.id);
         changed = true;
       } else if (actionType === 1 && target && shots.length > 1) {
         const index = shots.indexOf(target);
@@ -884,6 +1120,7 @@ export async function handleLocalApi(req, res, pathname) {
           target.originText = [target.originText, next.originText].filter(Boolean).join('\n');
           target.duration = (Number(target.duration) || 2) + (Number(next.duration) || 2);
           data.shots.splice(data.shots.indexOf(next), 1);
+          data.shotHistory = data.shotHistory.filter(item => item.storyBoardId !== next.id);
           changed = target;
         }
       }
@@ -915,9 +1152,32 @@ export async function handleLocalApi(req, res, pathname) {
     case '/storyboard/plaza/content/list':
       result = ok(list([], body));
       break;
-    case '/storyboard/api/historyList':
-      result = ok(list([], body));
+    case '/storyboard/api/historyList': {
+      const storyBoardId = Number(body.storyBoardId || body.id);
+      let history = data.shotHistory.filter(item => item.storyBoardId === storyBoardId);
+      if (body.type) history = history.filter(item => item.type === Number(body.type));
+      result = ok(list(history.reverse(), body));
       break;
+    }
+    case '/storyboard/api/switchMaterial': {
+      const shot = data.shots.find(item => item.id === Number(body.storyBoardId) &&
+        item.seriesId === Number(body.seriesId));
+      const type = Number(body.type);
+      const history = data.shotHistory.find(item =>
+        item.id === Number(body.storyBoardHistoryId) &&
+        item.storyBoardId === shot?.id && item.type === type);
+      if (!shot || !history || ![1, 2].includes(type)) {
+        result = { code: 404, msg: '分镜历史素材不存在' };
+        break;
+      }
+      if (type === 1) shot.imageList = structuredClone(history.imageList);
+      else shot.videoList = structuredClone(history.videoList);
+      shot.historyId = history.id;
+      shot.historyType = type;
+      save();
+      result = ok(shot);
+      break;
+    }
     case '/storyboard/imagePreset/list':
       result = ok({ items: [], total: 0 });
       break;

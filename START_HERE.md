@@ -24,10 +24,12 @@ node server.mjs
 | `server.mjs` | 本地 HTTP、静态资源、上传与 WebSocket 入口 | 本项目源码，可直接改 |
 | `local-api.mjs` | 项目、剧集、分镜、素材和画布等本地 API | 本项目源码，可直接改 |
 | `local-export.mjs` | 本地素材导出清单和剪辑草稿数据 | 本项目源码，可直接改 |
+| `local-api-check.mjs` | 资产、剧集和分镜接口的隔离数据检查 | 本项目源码，可直接改 |
 | `public-gateway.mjs` | 带密码的公网访问网关 | 本项目源码，可直接改 |
 | `index.html`、`branding/`、`logo.png`、`titleIcon.svg` | 页面入口和自有品牌资源 | 本项目文件，可直接改 |
 | `ai_comic/`、`resourceBucket/`、`plaza-assets/` 等 | 页面运行所需的前端发布文件、字体和图像 | 第三方压缩发布包；可检查和修改副本，但没有原始组件工程 |
 | `local-data.example.json` | 空数据示例 | 本项目文件 |
+| `REA_FINDINGS.md` | REA 前端证据摘要与本地实现边界 | 本项目文档 |
 
 前端页面并非完整的 React/Vite 源码树，没有原始组件、构建配置、源映射和原站后端。`ai_comic/production/assets/` 中的脚本是压缩后的发布文件；修改它们可以改变本地页面，但维护成本较高。自行编写的代码使用本项目的 MIT 许可证；第三方文件的授权边界见 `THIRD_PARTY.md`。
 

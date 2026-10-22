@@ -23,8 +23,9 @@ if ((Test-Path -LiteralPath $folder) -or (Test-Path -LiteralPath $zip)) {
 }
 
 $files = @(
-  '.gitignore', 'LICENSE', 'README.md', 'START_HERE.md', 'THIRD_PARTY.md',
+  '.gitignore', 'LICENSE', 'README.md', 'START_HERE.md', 'THIRD_PARTY.md', 'REA_FINDINGS.md',
   'package.json', 'index.html', 'server.mjs', 'local-api.mjs', 'local-export.mjs',
+  'local-api-check.mjs',
   'public-gateway.mjs', 'local-data.example.json', 'offline-assets-manifest.json',
   'logo.png', 'titleIcon.svg', 'Sparkles.svg', 'score.svg', 'canvas-bg.webp',
   'start-local.cmd', 'build-portable.ps1'

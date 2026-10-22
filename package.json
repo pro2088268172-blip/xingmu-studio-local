@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node server.mjs",
     "gateway": "node public-gateway.mjs",
+    "check:local": "node local-api-check.mjs",
     "render-brand": "node branding/render-brand.mjs"
   }
 }
