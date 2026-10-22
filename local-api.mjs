@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { describeSeriesMedia, prepareSeriesExport } from './local-export.mjs';
 
 const dataPath = process.env.JZZM_LOCAL_DATA || join(import.meta.dirname, 'local-data.json');
 const empty = () => ({ nextId: 1000, projects: [], series: [], shots: [], folders: [], library: [], resources: [], canvasProjects: [], canvasFolders: [] });
@@ -176,8 +177,9 @@ const canvasDocumentFor = (projectId, projectUuid) => {
   data.canvasDocuments[key] ||= {
     canvas: { projectId, projectUuid, viewport: { x: 0, y: 0, zoom: 1 },
       canvasVersion: 0, nodeCount: 0, edgeCount: 0, updatedAt: new Date().toISOString() },
-    nodes: [], edges: [], businessData: {}, bootstrap: {},
+    nodes: [], edges: [], businessData: {}, bootstrap: {}, changes: [],
   };
+  data.canvasDocuments[key].changes ||= [];
   return data.canvasDocuments[key];
 };
 const canvasNodeView = node => ({ ...node, ...node.layout });
@@ -902,7 +904,10 @@ export async function handleLocalApi(req, res, pathname) {
       result = ok({ status: 0 });
       break;
     case '/storyboard/api/listImageVideo':
-      result = { code: 501, msg: '剪映草稿导出需要本地导出服务，当前尚未接入' };
+      result = describeSeriesMedia(data, body, import.meta.dirname);
+      break;
+    case '/storyboard/api/export/jsonBySeriesId':
+      result = prepareSeriesExport(data, body, import.meta.dirname);
       break;
     case '/storyboard/plaza/home':
       result = ok({ banners: [], recommendations: [], items: [] });
@@ -1173,38 +1178,77 @@ export async function handleLocalApi(req, res, pathname) {
           const projectId = Number(canvasUpdate[1]);
           const document = canvasDocumentFor(projectId, canvasUpdate[2]);
           const now = new Date().toISOString();
+          const fromVersion = document.canvas.canvasVersion;
+          const changedNodeKeys = new Set();
+          const deletedNodeKeys = new Set();
+          const changedEdgeIds = new Set();
+          const deletedEdgeIds = new Set();
+          const changedBusinessKeys = new Set();
           const created = Array.isArray(body.nodes?.create) ? body.nodes.create : [];
           const updated = Array.isArray(body.nodes?.update) ? body.nodes.update : [];
           const deleted = Array.isArray(body.nodes?.delete) ? body.nodes.delete : [];
           for (const node of created) {
             if (!node?.nodeKey || document.nodes.some(item => item.nodeKey === node.nodeKey)) continue;
             document.nodes.push({ ...node, createdAt: now, updatedAt: now });
-            if (node.businessData) document.businessData[node.nodeKey] = node.businessData;
+            changedNodeKeys.add(node.nodeKey);
+            if (node.businessData) {
+              document.businessData[node.nodeKey] = node.businessData;
+              changedBusinessKeys.add(node.nodeKey);
+            }
           }
           for (const patch of updated) {
             const node = document.nodes.find(item => item.nodeKey === patch.nodeKey);
-            if (node) Object.assign(node, patch, { nodeData: { ...node.nodeData, ...patch.nodeData },
-              layout: { ...node.layout, ...patch.layout }, updatedAt: now });
-            if (patch.businessData) document.businessData[patch.nodeKey] = patch.businessData;
+            if (node) {
+              Object.assign(node, patch, { nodeData: { ...node.nodeData, ...patch.nodeData },
+                layout: { ...node.layout, ...patch.layout }, updatedAt: now });
+              changedNodeKeys.add(patch.nodeKey);
+            }
+            if (patch.businessData) {
+              document.businessData[patch.nodeKey] = patch.businessData;
+              changedBusinessKeys.add(patch.nodeKey);
+            }
           }
           for (const item of deleted) {
             const nodeKey = typeof item === 'string' ? item : item?.nodeKey;
             document.nodes = document.nodes.filter(node => node.nodeKey !== nodeKey);
             delete document.businessData[nodeKey];
+            if (nodeKey) { deletedNodeKeys.add(nodeKey); changedNodeKeys.delete(nodeKey); }
           }
-          if (Array.isArray(body.edges?.create)) document.edges.push(...body.edges.create);
+          if (Array.isArray(body.edges?.create)) for (const edge of body.edges.create) {
+            if (!edge?.connectionId) continue;
+            document.edges.push(edge);
+            changedEdgeIds.add(edge.connectionId);
+          }
           if (Array.isArray(body.edges?.delete)) {
             const removed = new Set(body.edges.delete.map(item => typeof item === 'string' ? item : item.connectionId));
             document.edges = document.edges.filter(edge => !removed.has(edge.connectionId));
+            for (const id of removed) {
+              deletedEdgeIds.add(id);
+              changedEdgeIds.delete(id);
+            }
           }
           if (body.viewport) document.canvas.viewport = body.viewport;
           for (const item of body.businessData?.upsert || []) {
-            if (item?.nodeKey) document.businessData[item.nodeKey] = item.businessData || {};
+            if (item?.nodeKey) {
+              document.businessData[item.nodeKey] = item.businessData || {};
+              changedBusinessKeys.add(item.nodeKey);
+            }
           }
           document.canvas.canvasVersion += 1;
           document.canvas.nodeCount = document.nodes.length;
           document.canvas.edgeCount = document.edges.length;
           document.canvas.updatedAt = now;
+          document.changes.push({ fromVersion, toVersion: document.canvas.canvasVersion,
+            viewport: document.canvas.viewport,
+            nodes: { upsert: document.nodes.filter(node => changedNodeKeys.has(node.nodeKey))
+              .map(canvasNodeView), delete: [...deletedNodeKeys] },
+            edges: { upsert: document.edges.filter(edge => changedEdgeIds.has(edge.connectionId)),
+              delete: [...deletedEdgeIds] },
+            businessData: [...changedBusinessKeys].filter(nodeKey => !deletedNodeKeys.has(nodeKey))
+              .map(nodeKey => ({ nodeKey,
+                hasBusinessData: nodeKey in document.businessData,
+                businessDataHash: String(document.canvas.canvasVersion) })) });
+          if (document.changes.length > 100) document.changes.splice(0, document.changes.length - 100);
           const project = data.canvasProjects.find(item => item.projectId === projectId);
           if (project) { project.nodeCount = document.nodes.length; project.updateTime = now; }
           save();
@@ -1219,9 +1263,46 @@ export async function handleLocalApi(req, res, pathname) {
           })), missing: keys.filter(key => !(key in document.businessData)), notModified: [] });
         } else if (canvasChanges && req.method === 'GET') {
           const document = canvasDocumentFor(Number(canvasChanges[1]), canvasChanges[2]);
-          result = okStrict({ fromVersion: document.canvas.canvasVersion, toVersion: document.canvas.canvasVersion,
-            viewport: document.canvas.viewport, nodes: { upsert: [], delete: [] },
-            edges: { upsert: [], delete: [] }, businessData: [] });
+          const sinceVersion = Number(new URL(req.url, 'http://localhost').searchParams.get('sinceVersion') ??
+            document.canvas.canvasVersion);
+          const changes = document.changes.filter(change => change.toVersion > sinceVersion);
+          if (!Number.isSafeInteger(sinceVersion) || sinceVersion < 0 ||
+              sinceVersion > document.canvas.canvasVersion ||
+              sinceVersion < document.canvas.canvasVersion && !changes.length ||
+              changes.length && changes[0].fromVersion !== sinceVersion) {
+            result = { code: 409, msg: '画布版本已过期，请重新加载' };
+          } else {
+            const nodes = new Map();
+            const deletedNodes = new Set();
+            const edges = new Map();
+            const deletedEdges = new Set();
+            const businessData = new Map();
+            for (const change of changes) {
+              for (const node of change.nodes.upsert) {
+                nodes.set(node.nodeKey, node);
+                deletedNodes.delete(node.nodeKey);
+              }
+              for (const nodeKey of change.nodes.delete) {
+                nodes.delete(nodeKey);
+                deletedNodes.add(nodeKey);
+                businessData.delete(nodeKey);
+              }
+              for (const edge of change.edges.upsert) {
+                edges.set(edge.connectionId, edge);
+                deletedEdges.delete(edge.connectionId);
+              }
+              for (const edgeId of change.edges.delete) {
+                edges.delete(edgeId);
+                deletedEdges.add(edgeId);
+              }
+              for (const item of change.businessData) businessData.set(item.nodeKey, item);
+            }
+            result = okStrict({ fromVersion: sinceVersion,
+              toVersion: document.canvas.canvasVersion, viewport: document.canvas.viewport,
+              nodes: { upsert: [...nodes.values()], delete: [...deletedNodes] },
+              edges: { upsert: [...edges.values()], delete: [...deletedEdges] },
+              businessData: [...businessData.values()] });
+          }
         } else if (canvasPreview && req.method === 'GET') {
           result = okStrict({ initialized: false, projectId: Number(canvasPreview[1]),
             projectUuid: canvasPreview[2] });
