@@ -1368,18 +1368,23 @@ export async function handleLocalApi(req, res, pathname) {
       break;
     }
     case '/storyboard/api/libraryHistoryList': {
+      const requestedId = Number(body.libraryId);
       const library = data.library.find(item =>
-        item.id === Number(body.libraryId) && item.projectId === Number(body.projectId) &&
+        (item.id === requestedId || item.images?.some(image => image.id === requestedId)) &&
+        item.projectId === Number(body.projectId) &&
         (!body.type || item.type === Number(body.type)));
       if (!library) { result = ok({ items: [], total: 0 }); break; }
-      const current = localLibraryImages(library).map(({ image, url }) => ({
-        id: -Number(image.id), libraryHistoryId: -Number(image.id),
-        libraryId: library.id, projectId: library.projectId, imageId: image.id,
-        type: library.type, name: image.name || library.name,
-        resourceUrl: url, isCurrent: true,
-        createAt: image.createTime || library.createTime,
-      }));
+      const imageId = library.id === requestedId ? null : requestedId;
+      const current = localLibraryImages(library, imageId === null ? null : new Set([imageId]))
+        .map(({ image, url }) => ({
+          id: -Number(image.id), libraryHistoryId: -Number(image.id),
+          libraryId: library.id, projectId: library.projectId, imageId: image.id,
+          type: library.type, name: image.name || library.name,
+          resourceUrl: url, isCurrent: true,
+          createAt: image.createTime || library.createTime,
+        }));
       const previous = data.libraryHistory.filter(item => item.libraryId === library.id)
+        .filter(item => imageId === null || item.imageId === imageId)
         .filter(item => localResourceImage(item.resourceUrl))
         .sort((left, right) => Date.parse(right.createAt) - Date.parse(left.createAt));
       const items = [...current, ...previous];
@@ -1387,15 +1392,18 @@ export async function handleLocalApi(req, res, pathname) {
       break;
     }
     case '/storyboard/api/switchLibraryHistory': {
-      const library = data.library.find(item => item.id === Number(body.libraryId) &&
+      const requestedId = Number(body.libraryId);
+      const library = data.library.find(item =>
+        (item.id === requestedId || item.images?.some(image => image.id === requestedId)) &&
         item.projectId === Number(body.projectId));
+      const imageId = library?.id === requestedId ? null : requestedId;
       const historyId = Number(body.libraryHistoryId);
       const history = historyId > 0 ? data.libraryHistory.find(item =>
-        item.id === historyId && item.libraryId === library?.id) : null;
+        item.id === historyId && item.libraryId === library?.id &&
+        (imageId === null || item.imageId === imageId)) : null;
       const selectedImage = historyId < 0 ? library?.images?.find(image =>
-        image.id === -historyId) : library?.images?.find(image =>
-        image.id === history?.imageId) || library?.images?.find(image => image.isMain) ||
-        library?.images?.[0];
+        image.id === -historyId && (imageId === null || image.id === imageId)) :
+        library?.images?.find(image => image.id === history?.imageId);
       const resourceUrl = historyId > 0 ? localResourceImage(history?.resourceUrl) :
         localResourceImage(Array.isArray(selectedImage?.resourceUrl)
           ? selectedImage.resourceUrl[0] : selectedImage?.resourceUrl);

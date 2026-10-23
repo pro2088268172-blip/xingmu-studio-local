@@ -242,8 +242,18 @@ try {
   const originalVersion = libraryHistory.result.items.find(item =>
     item.id > 0 && item.resourceUrl === '/local-upload/image/test.png');
   assert.ok(originalVersion);
+  const imageHistory = await call(api, '/gw/storyboard/api/libraryHistoryList', {
+    projectId, libraryId: syncSource.result.images[0].id, type: 1,
+  });
+  assert.equal(imageHistory.result.items.some(item => item.id === originalVersion.id), true);
+  assert.equal(imageHistory.result.items.every(item =>
+    item.imageId === syncSource.result.images[0].id), true);
   assert.equal((await call(api, '/gw/storyboard/api/switchLibraryHistory', {
-    projectId, libraryId: syncSource.result.id,
+    projectId, libraryId: secondImage.result.id,
+    libraryHistoryId: originalVersion.id,
+  })).code, 404);
+  assert.equal((await call(api, '/gw/storyboard/api/switchLibraryHistory', {
+    projectId, libraryId: syncSource.result.images[0].id,
     libraryHistoryId: originalVersion.id,
   })).result.images[0].resourceUrl[0], '/local-upload/image/test.png');
   assert.equal((await call(api, '/gw/storyboard/api/switchLibraryHistory', {
