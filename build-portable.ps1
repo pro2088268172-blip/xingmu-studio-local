@@ -25,7 +25,7 @@ if ((Test-Path -LiteralPath $folder) -or (Test-Path -LiteralPath $zip)) {
 $files = @(
   '.gitignore', 'LICENSE', 'README.md', 'START_HERE.md', 'THIRD_PARTY.md', 'REA_FINDINGS.md',
   'package.json', 'index.html', 'server.mjs', 'local-api.mjs', 'local-export.mjs',
-  'local-api-check.mjs',
+  'local-api-check.mjs', 'patch-local-frontend.mjs',
   'public-gateway.mjs', 'local-data.example.json', 'offline-assets-manifest.json',
   'logo.png', 'titleIcon.svg', 'Sparkles.svg', 'score.svg', 'canvas-bg.webp',
   'start-local.cmd', 'build-portable.ps1'
@@ -44,6 +44,8 @@ foreach ($name in $files) {
 foreach ($name in $directories) {
   Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $folder $name) -Recurse
 }
+& node (Join-Path $folder 'patch-local-frontend.mjs') $folder
+if ($LASTEXITCODE -ne 0) { throw 'Local frontend patch failed.' }
 
 $manifest = foreach ($file in (Get-ChildItem -LiteralPath $folder -Recurse -File | Sort-Object FullName)) {
   $relative = $file.FullName.Substring($folder.Length + 1).Replace('\', '/')

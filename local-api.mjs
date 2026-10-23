@@ -1455,10 +1455,64 @@ export async function handleLocalApi(req, res, pathname) {
       break;
     }
     case '/storyboard/api/updateProjectLibrary': {
-      const item = data.library.find(item => item.id === id);
-      if (item) Object.assign(item, body, { id: item.id });
+      const item = data.library.find(item => item.id === id &&
+        (!body.projectId || item.projectId === Number(body.projectId)));
+      if (!item) { result = { code: 404, msg: '项目素材不存在' }; break; }
+      if (body.images !== undefined && !Array.isArray(body.images)) {
+        result = { code: 400, msg: '形象列表格式无效' };
+        break;
+      }
+      const existingImages = new Map((item.images || [])
+        .filter(image => Number(image.id) > 0)
+        .map(image => [Number(image.id), image]));
+      const seenIds = new Set();
+      if (body.images?.some(image => {
+        if (!image || typeof image !== 'object' || Array.isArray(image)) return true;
+        const imageId = Number(image.id) || 0;
+        if (imageId <= 0) return false;
+        if (!existingImages.has(imageId) || seenIds.has(imageId)) return true;
+        seenIds.add(imageId);
+        return false;
+      })) {
+        result = { code: 400, msg: '形象不属于该项目素材或重复提交' };
+        break;
+      }
+      const fields = { ...body };
+      delete fields.id;
+      delete fields.projectId;
+      delete fields.type;
+      delete fields.images;
+      Object.assign(item, fields);
+      if (body.images) {
+        const retainedIds = new Set();
+        item.images = body.images.map(incoming => {
+          const prior = existingImages.get(Number(incoming.id));
+          const imageId = prior?.id || nextId();
+          const sourceUrls = incoming.resourceUrl === undefined
+            ? prior?.resourceUrl : incoming.resourceUrl;
+          const resourceUrl = (Array.isArray(sourceUrls) ? sourceUrls :
+            [sourceUrls].filter(Boolean)).map(localUploadUrl);
+          if (prior && JSON.stringify(prior.resourceUrl || []) !== JSON.stringify(resourceUrl))
+            recordLibraryHistory(item, prior);
+          retainedIds.add(Number(imageId));
+          return { ...prior, ...incoming, id: imageId, projectLibraryId: item.id,
+            resourceUrl,
+            referenceImages: incoming.referenceImages === undefined
+              ? prior?.referenceImages : localMediaList(incoming.referenceImages) };
+        });
+        data.libraryHistory = data.libraryHistory.filter(history =>
+          history.libraryId !== item.id || retainedIds.has(Number(history.imageId)));
+        if (item.images.length && !item.images.some(image => image.isMain))
+          item.images[0].isMain = 1;
+        let mainSeen = false;
+        for (const image of item.images) {
+          const isMain = Boolean(image.isMain) && !mainSeen;
+          image.isMain = Number(isMain);
+          if (isMain) mainSeen = true;
+        }
+      }
       save();
-      result = ok(item || null);
+      result = ok(item);
       break;
     }
     case '/storyboard/api/deleteProjectLibrary':

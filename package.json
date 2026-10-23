@@ -8,6 +8,7 @@
     "start": "node server.mjs",
     "gateway": "node public-gateway.mjs",
     "check:local": "node local-api-check.mjs",
+    "patch:frontend": "node patch-local-frontend.mjs",
     "render-brand": "node branding/render-brand.mjs"
   }
 }

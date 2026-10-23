@@ -25,6 +25,7 @@ node server.mjs
 | `local-api.mjs` | 项目、剧集、分镜、素材和画布等本地 API | 本项目源码，可直接改 |
 | `local-export.mjs` | 本地素材导出清单和剪辑草稿数据 | 本项目源码，可直接改 |
 | `local-api-check.mjs` | 资产、剧集和分镜接口的隔离数据检查 | 本项目源码，可直接改 |
+| `patch-local-frontend.mjs` | 对第三方发布脚本副本应用本地素材展开及历史卡片补丁 | 本项目源码，可直接改；原发布文件版本变化时会拒绝盲目替换 |
 | `public-gateway.mjs` | 带密码的公网访问网关 | 本项目源码，可直接改 |
 | `index.html`、`branding/`、`logo.png`、`titleIcon.svg` | 页面入口和自有品牌资源 | 本项目文件，可直接改 |
 | `ai_comic/`、`resourceBucket/`、`plaza-assets/` 等 | 页面运行所需的前端发布文件、字体和图像 | 第三方压缩发布包；可检查和修改副本，但没有原始组件工程 |
@@ -48,3 +49,4 @@ node server.mjs
 本包不含 `.git`。在解压后的目录运行 `git init` 即可建立自己的仓库；`.gitignore` 默认排除个人数据和第三方资源。如果要备份整个**私人**开发副本，另行选择合适的存储和授权方式。公开的 GitHub 仓库只含本项目自行编写的源码，不足以单独启动完整页面；这个开发包附上了运行资源。
 
 `build-portable.ps1` 可以从完整工作目录重新打包，会拒绝覆盖已有包，并排除个人数据、凭据、测试产物和 `.git`。
+打包脚本会在包内执行 `patch-local-frontend.mjs` 并校验补丁。若重新下载了未修改的前端发布资源，在本地运行 `node patch-local-frontend.mjs` 后再启动。

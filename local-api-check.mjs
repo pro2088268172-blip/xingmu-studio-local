@@ -458,6 +458,38 @@ try {
   assert.equal((await call(api, '/gw/storyboard/api/projectHistoryList', {
     projectId: copied.result.id,
   })).result.total, 3);
+  const beforeAppearanceEdit = (await call(api, '/gw/storyboard/api/projectLibraryList', {
+    projectId, type: 1,
+  })).result.items.find(item => item.id === syncSource.result.id);
+  const editedAppearance = await call(api, '/gw/storyboard/api/updateProjectLibrary', {
+    id: syncSource.result.id, projectId, name: '待同步角色已编辑',
+    images: [...beforeAppearanceEdit.images, {
+      name: '页面新增形象', isMain: 0,
+      resourceUrl: [`http://127.0.0.1:4175/local-upload/image/test3.png`],
+      referenceImages: [`http://127.0.0.1:4175/local-upload/image/test.png`],
+    }],
+  });
+  assert.equal(editedAppearance.code, 0);
+  const newAppearance = editedAppearance.result.images.find(image =>
+    image.name === '页面新增形象');
+  assert.ok(Number(newAppearance.id) > 0);
+  assert.equal(newAppearance.projectLibraryId, syncSource.result.id);
+  assert.equal(newAppearance.resourceUrl[0], '/local-upload/image/test3.png');
+  assert.equal(newAppearance.referenceImages[0], '/local-upload/image/test.png');
+  assert.equal((await call(api, '/gw/storyboard/api/updateProjectLibrary', {
+    id: syncSource.result.id, projectId,
+    images: [{ id: 9999999, name: '其他素材形象' }],
+  })).code, 400);
+  assert.equal((await call(api, '/gw/storyboard/api/setMainImage', {
+    id: newAppearance.id,
+  })).code, 0);
+  api = (await import(`${moduleUrl}?reload=3`)).handleLocalApi;
+  const persistedAppearance = (await call(api, '/gw/storyboard/api/projectLibraryList', {
+    projectId, type: 1,
+  })).result.items.find(item => item.id === syncSource.result.id)
+    .images.find(image => image.id === newAppearance.id);
+  assert.equal(persistedAppearance.resourceUrl[0], '/local-upload/image/test3.png');
+  assert.equal(persistedAppearance.isMain, 1);
   await call(api, '/gw/storyboard/series/deleteSeries', { id: seriesId });
   assert.equal((await call(api, '/gw/storyboard/api/historyList', {
     storyBoardId: shot.result.id,
